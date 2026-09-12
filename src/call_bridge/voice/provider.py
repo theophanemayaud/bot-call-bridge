@@ -33,9 +33,11 @@ class TurnDetection:
     idle_timeout_ms: int | None = None
     # OpenAI semantic_vad eagerness: low|medium|high|auto
     eagerness: str | None = "auto"
-    # False = overlapping duplex (live translate / talk-over).
-    # True = AVM-style yield when the callee takes the floor.
-    interrupt_response: bool = False
+    # True = AVM-style: cancel assistant speech when callee talks so a new
+    # response can answer them (needed with create_response / semantic_vad).
+    # False = overlap mode (live translate) — do NOT steer/create while speaking.
+    interrupt_response: bool = True
+
 
 
 @dataclass(slots=True, frozen=True)

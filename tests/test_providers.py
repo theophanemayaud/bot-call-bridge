@@ -68,7 +68,7 @@ def test_openai_session_payload_pcma_and_tools():
     assert payload["audio"]["output"]["voice"] == "cedar"
     assert payload["audio"]["input"]["turn_detection"]["type"] == "semantic_vad"
     assert payload["audio"]["input"]["turn_detection"]["eagerness"] == "auto"
-    assert payload["audio"]["input"]["turn_detection"]["interrupt_response"] is False
+    assert payload["audio"]["input"]["turn_detection"]["interrupt_response"] is True
     assert payload["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
     names = {t["name"] for t in payload["tools"]}
     assert names == {"hangup", "ask_orchestrator"}

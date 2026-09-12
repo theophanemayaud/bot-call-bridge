@@ -8,7 +8,7 @@ Set `VOICE_PROVIDER=openai` and paste `OPENAI_API_KEY`. Leave the other OpenAI e
 |---|---|
 | Codec | Native **PCMA** 8 kHz both ways (no local resample) |
 | Turn taking | Default **`semantic_vad`** (`eagerness=auto`) — closer to ChatGPT Advanced Voice than silence-only VAD |
-| Overlap / duplex | `interrupt_response=false` by default — assistant can keep speaking while the callee talks |
+| Barge-in / AVM | `interrupt_response=true` by default — cancels assistant speech when you talk so it can answer (set `false` only for live-translate overlap) |
 | Tools | `ask_orchestrator`, `hangup` (audible goodbye then BYE) |
 | Disclosure | `speak_first` / SCRIPT disclosure via `response.create` |
 | Probe | `POST /v1/voice/probe` |
