@@ -1,0 +1,38 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr"
+  },
+  "mission": {
+    "disclosure": "Bonjour Papa, je suis un assistant vocal automatique qui appelle pour Théophane. Cet appel est un test d'assistance par intelligence artificielle.",
+    "goals": [
+      "Confirmer que Papa t'entend bien",
+      "Demander s'il a déjà renvoyé le kit Starlink cassé ou remplacé après le remplacement",
+      "Demander si le nouveau kit fonctionne correctement",
+      "Remercier et raccrocher"
+    ],
+    "constraints": [
+      "Parler uniquement en français",
+      "Rester court (moins de 3 minutes)",
+      "Ne pas inventer de logistique, de suivi ou de numéro de suivi Starlink",
+      "Ne pas prétendre être Théophane en personne",
+      "Ne pas laisser un message vocal de plus de 15 secondes"
+    ],
+    "fallbacks": [
+      "Si répondeur: laisser un court message disant que Théophane demandait si le kit Starlink a été renvoyé et si le nouveau fonctionne, puis proposer un rappel et raccrocher",
+      "Si occupé ou refus: s'excuser, remercier, raccrocher"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": "Ton amical et respectueux. Priorité: réponses claires oui/non (ou statut) sur le renvoi du vieux kit et le fonctionnement du nouveau. Si une question factuelle hors script arrive, utilise ask_orchestrator."
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": ["Starlink", "Théophane", "kit", "renvoyé", "remplacement"],
+    "max_duration_seconds": 180,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "call-agent",
+    "ticket": "dad-starlink-return-check"
+  }
+}

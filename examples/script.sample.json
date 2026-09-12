@@ -1,0 +1,35 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr",
+    "caller_id": null
+  },
+  "mission": {
+    "disclosure": "Bonjour, je suis un assistant vocal automatique. Cet appel est passé par une intelligence artificielle.",
+    "goals": [
+      "Confirm the Tuesday 10:00 appointment",
+      "If they want another slot, collect a weekday and time"
+    ],
+    "constraints": [
+      "Do not discuss pricing",
+      "Do not claim a human is on the line",
+      "Do not leave a voicemail longer than 15 seconds"
+    ],
+    "fallbacks": [
+      "If voicemail: leave a short callback message and hang up",
+      "If they refuse or are busy: apologize, thank them, hang up"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": ""
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": ["mardi"],
+    "max_duration_seconds": 180,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "example",
+    "ticket": "demo-0001"
+  }
+}

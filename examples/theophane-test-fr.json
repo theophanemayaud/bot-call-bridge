@@ -1,0 +1,36 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr"
+  },
+  "mission": {
+    "disclosure": "Bonjour Théophane, je suis un assistant vocal automatique. Cet appel est un test du pont OVH vers Grok Voice.",
+    "goals": [
+      "Confirmer que Théophane décroche et entend clairement",
+      "Demander brièvement si l'audio est bon dans les deux sens",
+      "Remercier et raccrocher rapidement"
+    ],
+    "constraints": [
+      "Parler uniquement en français",
+      "Rester très court (moins d'une minute)",
+      "Ne pas inventer d'informations",
+      "Ne pas laisser de message vocal long"
+    ],
+    "fallbacks": [
+      "Si répondeur: laisser un court message de test et raccrocher",
+      "Si occupé ou refuse: s'excuser et raccrocher"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": "Ton amical et technique. Dès que l'audio est confirmé, dire au revoir et utiliser hangup."
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": ["Théophane", "OVH", "Grok"],
+    "max_duration_seconds": 90,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "software-eng",
+    "ticket": "theophane-ovh-first-test"
+  }
+}
