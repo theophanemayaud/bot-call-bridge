@@ -1,0 +1,37 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr"
+  },
+  "mission": {
+    "disclosure": "Bonjour, je suis un assistant vocal automatique. Cet appel est un test d'intelligence artificielle.",
+    "goals": [
+      "Te présenter brièvement et confirmer que le correspondant t'entend bien",
+      "Demander si le kit de remplacement a bien été renvoyé, et si le nouveau fonctionne",
+      "Si la conversation est fluide, remercier et proposer de raccrocher"
+    ],
+    "constraints": [
+      "Parler uniquement en français",
+      "Rester court et clair (objectif: moins de 2 minutes)",
+      "Ne pas inventer d'informations sur le dossier matériel",
+      "Ne pas prétendre être un humain",
+      "Ne pas laisser un message vocal de plus de 15 secondes"
+    ],
+    "fallbacks": [
+      "Si répondeur: laisser un court message disant qu'il s'agit d'un test d'appel IA, puis raccrocher",
+      "Si le correspondant refuse ou est occupé: s'excuser, remercier, raccrocher"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": "Ton amical et professionnel. Si le correspondant pose une question factuelle que tu ne connais pas, utilise ask_orchestrator."
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": ["kit", "remplacement"],
+    "max_duration_seconds": 180,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "software-eng",
+    "ticket": "demo-outbound"
+  }
+}

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+bridge.log
+dist/
+*.egg-info/
+call-*.jsonl
+.secrets/
+*.raw
+.pytest_cache/

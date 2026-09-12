@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Call Bridge</title>
+  <style>
+    :root {
+      --ink: #e8e0d0;
+      --muted: #9a8f7c;
+      --bg: #14110e;
+      --panel: #1c1813;
+      --line: #3a3228;
+      --amber: #e3a14a;
+      --green: #7dba6a;
+      --red: #d45d4a;
+      --blue: #7ea0c4;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "IBM Plex Sans", "Source Sans 3", system-ui, sans-serif; }
+    header {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 16px 20px 12px; border-bottom: 1px solid var(--line);
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.04em; }
+    header h1 span { color: var(--amber); }
+    header p { margin: 0; color: var(--muted); font-size: 12px; }
+    main { display: grid; grid-template-columns: 320px 1fr 360px; gap: 16px; padding: 16px 20px 24px; }
+    @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+    section {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 14px 16px;
+      min-height: 280px;
+    }
+    h2 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; margin: 0 6px 6px 0; }
+    .ok { color: var(--green); border-color: #355c32; }
+    .warn { color: var(--amber); border-color: #6d4d22; }
+    .bad { color: var(--red); border-color: #6d332c; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    textarea, input, select {
+      width: 100%; background: #100e0b; color: var(--ink); border: 1px solid var(--line);
+      border-radius: 6px; padding: 8px; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+    }
+    textarea { min-height: 280px; resize: vertical; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button {
+      background: var(--amber); color: #1a1208; border: 0; border-radius: 6px;
+      padding: 8px 12px; font-weight: 600; cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button.danger { background: var(--red); color: #fff; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #events {
+      height: 520px; overflow: auto; font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+      background: #100e0b; border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+    }
+    .ev { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid #2a241c; }
+    .ev .t { color: var(--muted); }
+    .ev .k { color: var(--amber); }
+    .empty { color: var(--muted); padding: 24px 8px; }
+    .err { color: var(--red); margin-top: 8px; min-height: 1.2em; }
+    .callbox { border: 1px dashed var(--line); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Call <span>Bridge</span></h1>
+    <p>SIP · Grok Voice · orchestrator control</p>
+  </header>
+  <main>
+    <section>
+      <h2>Service</h2>
+      <div id="status"><p class="empty">Loading status…</p></div>
+      <div class="row">
+        <button class="secondary" id="refresh">Refresh</button>
+        <button class="secondary" id="probe">Probe voice</button>
+      </div>
+      <p class="err" id="statusErr"></p>
+    </section>
+    <section>
+      <h2>SCRIPT / Dial</h2>
+      <label for="script">Call script (JSON)</label>
+      <textarea id="script"></textarea>
+      <div class="row">
+        <button id="dial">Place call</button>
+        <button class="danger" id="hangup" disabled>Hang up</button>
+      </div>
+      <p class="err" id="dialErr"></p>
+    </section>
+    <section>
+      <h2>Live call</h2>
+      <div id="callbox" class="empty">No active call. Paste a SCRIPT and dial. Far-end audio is the voice agent — not a local mic.</div>
+      <label for="steer">Mid-call guideline</label>
+      <input id="steer" placeholder="Wrap up — we will handle the rest later." />
+      <div class="row">
+        <button class="secondary" id="steerBtn" disabled>Inject steer</button>
+        <button class="secondary" id="speakBtn" disabled>Speak verbatim</button>
+      </div>
+      <label for="answer">Orchestrator answer (ask_orchestrator)</label>
+      <input id="answer" placeholder="Tuesday 10:00, ask them to confirm." />
+      <div class="row">
+        <button class="secondary" id="answerBtn" disabled>Send tool result</button>
+      </div>
+      <h2 style="margin-top:16px">Events</h2>
+      <div id="events"><div class="empty">Waiting for /v1/events…</div></div>
+    </section>
+  </main>
+  <script>
+    const SAMPLE = {
+      call: { to: "+33XXXXXXXXX", language: "fr" },
+      mission: {
+        disclosure: "Bonjour, je suis un assistant vocal automatique. Cet appel est passé par une intelligence artificielle.",
+        goals: ["Confirm Tuesday 10:00 appointment", "If they want another slot, collect it"],
+        constraints: ["Do not discuss pricing", "Do not leave a long voicemail"],
+        fallbacks: ["If voicemail: leave a 10-second callback and hang up", "If they refuse: thank them and hang up"],
+        speak_disclosure_first: true
+      },
+      voice: { voice: "eve", keyterms: ["mardi"], max_duration_seconds: 180 }
+    };
+
+    const $ = (id) => document.getElementById(id);
+    $("script").value = JSON.stringify(SAMPLE, null, 2);
+    let activeId = null;
+    let pendingTool = null;
+
+    function pill(text, cls) {
+      return `<span class="pill ${cls || ""}">${text}</span>`;
+    }
+
+    async function loadStatus() {
+      $("statusErr").textContent = "";
+      try {
+        const res = await fetch("/v1/status");
+        const data = await res.json();
+        const sip = data.sip || {};
+        const sipCls = sip.state === "registered" ? "ok" : sip.state === "register_failed" ? "bad" : "warn";
+        $("status").innerHTML =
+          pill("mode " + data.mode, data.mode === "mock" ? "warn" : "ok") +
+          pill("voice " + data.voice_provider, "ok") +
+          pill("sip " + sip.state + (sip.detail ? " · " + sip.detail : ""), sipCls);
+        const live = (data.active_calls || [])[0];
+        if (live) {
+          activeId = live.id;
+          renderCall(live);
+        }
+      } catch (err) {
+        $("statusErr").textContent = String(err);
+        $("status").innerHTML = `<p class="empty">Status unavailable.</p>`;
+      }
+    }
+
+    function renderCall(call) {
+      if (!call) {
+        $("callbox").className = "empty";
+        $("callbox").textContent = "No active call. Paste a SCRIPT and dial. Far-end audio is the voice agent — not a local mic.";
+        $("hangup").disabled = true;
+        $("steerBtn").disabled = true;
+        $("speakBtn").disabled = true;
+        $("answerBtn").disabled = !pendingTool;
+        return;
+      }
+      $("callbox").className = "callbox";
+      $("callbox").innerHTML =
+        `<strong>${call.to}</strong><br/>` +
+        pill(call.state, call.state === "failed" ? "bad" : "ok") +
+        pill(call.provider) +
+        pill(call.id) +
+        (call.pending_tools && call.pending_tools[0]
+          ? `<p>Waiting on <code>${call.pending_tools[0].tool}</code>: ${call.pending_tools[0].arguments.question || ""}</p>`
+          : "");
+      const live = !["ended", "failed"].includes(call.state);
+      $("hangup").disabled = !live;
+      $("steerBtn").disabled = !live;
+      $("speakBtn").disabled = !live;
+      $("answerBtn").disabled = !pendingTool;
+    }
+
+    function appendEvent(ev) {
+      const box = $("events");
+      if (box.querySelector(".empty")) box.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = "ev";
+      const copy = { ...ev };
+      delete copy.ts;
+      div.innerHTML = `<span class="t">${new Date((ev.ts || 0) * 1000).toLocaleTimeString()}</span> <span class="k">${ev.type}</span><br/>${escapeHtml(JSON.stringify(copy))}`;
+      box.prepend(div);
+      if (ev.type === "tool_call" && ev.tool === "ask_orchestrator") {
+        pendingTool = ev.tool_call_id;
+        $("answerBtn").disabled = !activeId;
+      }
+      if (ev.type === "call.state" && ev.call_id) {
+        activeId = ev.state === "ended" || ev.state === "failed" ? activeId : ev.call_id;
+        if (ev.state === "ended" || ev.state === "failed") {
+          pendingTool = null;
+        }
+        loadStatus();
+      }
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+
+    $("refresh").onclick = loadStatus;
+    $("probe").onclick = async () => {
+      $("statusErr").textContent = "";
+      try {
+        const res = await fetch("/v1/voice/probe", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        $("statusErr").textContent = data.ok ? "Voice probe ok (" + data.provider + ")." : "Voice probe did not reach session.ready.";
+      } catch (err) {
+        $("statusErr").textContent = String(err);
+      }
+    };
+
+    $("dial").onclick = async () => {
+      $("dialErr").textContent = "";
+      let script;
+      try { script = JSON.parse($("script").value); }
+      catch (err) { $("dialErr").textContent = "SCRIPT is not valid JSON."; return; }
+      try {
+        const res = await fetch("/v1/calls", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ script })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        activeId = data.id;
+        renderCall(data);
+      } catch (err) {
+        $("dialErr").textContent = String(err);
+      }
+    };
+
+    $("hangup").onclick = async () => {
+      if (!activeId) return;
+      await fetch(`/v1/calls/${activeId}/hangup`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "console" }) });
+    };
+
+    async function guideline(mode) {
+      if (!activeId) return;
+      const text = $("steer").value.trim();
+      if (!text) return;
+      await fetch(`/v1/calls/${activeId}/guidelines`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, mode })
+      });
+    }
+    $("steerBtn").onclick = () => guideline("steer");
+    $("speakBtn").onclick = () => guideline("speak");
+
+    $("answerBtn").onclick = async () => {
+      if (!activeId || !pendingTool) return;
+      const text = $("answer").value.trim();
+      if (!text) return;
+      await fetch(`/v1/calls/${activeId}/tool-results`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_call_id: pendingTool, output: { answer: text } })
+      });
+      pendingTool = null;
+      $("answerBtn").disabled = true;
+    };
+
+    function connectEvents() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${proto}://${location.host}/v1/events`);
+      ws.onmessage = (msg) => appendEvent(JSON.parse(msg.data));
+      ws.onclose = () => setTimeout(connectEvents, 1500);
+    }
+
+    loadStatus();
+    connectEvents();
+    setInterval(loadStatus, 8000);
+  </script>
+</body>
+</html>
