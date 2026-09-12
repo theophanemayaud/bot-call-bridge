@@ -1,6 +1,8 @@
-# Call Bridge
+# Bot Call Bridge (`bot-call-bridge`)
 
-Headless phone bridge: **SIP** ↔ **xAI Grok Voice Realtime**. The far-end of the call talks to Grok. There is no local microphone or speaker.
+Headless phone bridge: **SIP** ↔ **OpenAI Realtime** or **xAI Grok Voice**. The far-end of the call talks to the voice model. There is no local microphone or speaker.
+
+Switch voice with `VOICE_PROVIDER=openai|grok|mock` — paste only the matching API key; models/voices/URLs ship with working defaults.
 
 An orchestrator (or a Grok Bot **Call** agent) posts a SCRIPT — who to call, language, goals, constraints, fallbacks, AI disclosure. This process registers to **your** SIP provider, dials, and pipes G.711 a-Law RTP to/from the voice WebSocket as a virtual mic/speaker.
 

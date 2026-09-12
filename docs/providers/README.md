@@ -33,9 +33,18 @@ Then link the file from the table below and from `skills/setup/SKILL.md`.
 
 ## Documented providers
 
+### SIP / VoIP
+
 | Provider | Cloud / bot-box egress | Doc |
 |---|---|---|
 | **OVH** (softphone SIP line) | Proven reference path | [ovh.md](ovh.md) |
 | VoipWise | Often `500` from datacenter IPs; residential/softphone only | [voipwise.md](voipwise.md) |
+
+### Voice (Realtime)
+
+| Provider | Switch | Doc |
+|---|---|---|
+| **OpenAI Realtime** | `VOICE_PROVIDER=openai` + `OPENAI_API_KEY` | [openai.md](openai.md) |
+| **xAI Grok Voice** | `VOICE_PROVIDER=grok` + `XAI_API_KEY` | [xai-grok.md](xai-grok.md) |
 
 Do not add Twilio/Telnyx as required for MVP. Optional later providers get their own markdown — no code fork.
