@@ -94,7 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(
         title="Call Bridge",
-        description="SIP ↔ Grok Voice Realtime control plane",
+        description="SIP ↔ Grok Voice / OpenAI GPT-Live control plane",
         version="0.1.0",
         lifespan=lifespan,
     )

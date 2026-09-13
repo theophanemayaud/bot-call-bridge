@@ -52,7 +52,7 @@ Live path: `VOICE_PROVIDER=grok` and `XAI_API_KEY` from https://console.x.ai/
 
 Useful knobs: `XAI_VOICE_MODEL=grok-voice-think-fast-2.0`, `XAI_VOICE=eve`. Audio is PCMA 8 kHz — do not change codec to match a headset.
 
-`VOICE_PROVIDER=openai` uses OpenAI Realtime (`OPENAI_API_KEY`, optional `OPENAI_VOICE` / `OPENAI_REALTIME_MODEL`). Same SIP/PCMA path as Grok.
+`VOICE_PROVIDER=openai` uses OpenAI GPT-Live-1 (`OPENAI_API_KEY`, optional `OPENAI_VOICE` / `OPENAI_LIVE_MODEL`). Same SIP/PCMA path as Grok. Realtime `semantic_vad` / `interrupt_response` do not apply.
 
 ## 5. Live REGISTER check
 

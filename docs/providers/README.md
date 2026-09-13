@@ -40,11 +40,11 @@ Then link the file from the table below and from `skills/setup/SKILL.md`.
 | **OVH** (softphone SIP line) | Proven reference path | [ovh.md](ovh.md) |
 | VoipWise | Often `500` from datacenter IPs; residential/softphone only | [voipwise.md](voipwise.md) |
 
-### Voice (Realtime)
+### Voice
 
 | Provider | Switch | Doc |
 |---|---|---|
-| **OpenAI Realtime** | `VOICE_PROVIDER=openai` + `OPENAI_API_KEY` | [openai.md](openai.md) |
+| **OpenAI GPT-Live-1** | `VOICE_PROVIDER=openai` + `OPENAI_API_KEY` | [openai.md](openai.md) |
 | **xAI Grok Voice** | `VOICE_PROVIDER=grok` + `XAI_API_KEY` | [xai-grok.md](xai-grok.md) |
 
 Do not add Twilio/Telnyx as required for MVP. Optional later providers get their own markdown — no code fork.
