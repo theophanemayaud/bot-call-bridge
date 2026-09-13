@@ -1,10 +1,35 @@
-# Call-agent integration
+# Bot Call Bridge — agent context
 
-This process is the telephony + speech-to-speech worker. The Grok Bot **Call** agent (or any orchestrator) owns the SCRIPT, answers `ask_orchestrator` quickly, and injects steers. It does **not** own SIP, RTP, or the Grok Voice WebSocket.
+This process is the telephony + speech-to-speech worker. Skills to copy into the bot later: `skills/setup`, `skills/troubleshoot`, `skills/handle-a-call` (optional `skills/package-call-bot`). Persona stub: `bot/PROFILE.md`.
 
-Skills to copy into the bot later: `skills/setup`, `skills/troubleshoot`, `skills/handle-a-call` (optional `skills/package-call-bot`). Persona stub: `bot/PROFILE.md`.
+## What this repo is
 
-**Reference live SIP:** [OVH softphone line](docs/providers/ovh.md). Other carriers: [docs/providers](docs/providers/README.md).
+Headless **server audio bridge**: SIP/RTP on one side, a voice-model WebSocket on the other. No local microphone or speaker.
+
+The Grok Bot **Call** agent (or any orchestrator) owns the SCRIPT, answers `ask_orchestrator` quickly, and injects steers. This process owns SIP, RTP, and the voice WebSocket. It does **not** own the conversation script.
+
+## Goals
+
+**Real-time (happy path).** A primary system goal is minimum end-to-end latency on the normal conversational path. Prefer solutions that do not permanently delay the media stream — no constant prebuffer / jitter delay as the default fix. When fixing duplex micro-cuts, prefer selective barge-in flush / policy changes over adding steady-state playout delay. *(Théophane, 2026-09-13)*
+
+Also true and durable:
+
+- **Server audio bridge** — OVH SIP (caller ID + credit) ↔ this process ↔ voice provider (GPT-Live-1 / Grok / mock). Do not switch the phone hop to OpenAI direct SIP by default.
+- **Wire audio** — PCMA 8 kHz, 20 ms frames. No resample unless a future provider cannot take PCMA.
+- **Ownership** — Call / orchestrator owns SCRIPT + tool answers; this bridge owns SIP / RTP / voice WS.
+- **One line** — `MAX_CONCURRENT_CALLS=1`. Fail a second `start_call`.
+- **Voicemail** — short message (who + why), goodbye, hang up. Do not sit in silence after a greeting. Idle safety net: `CALL_IDLE_TIMEOUT_SECONDS` (default 30, `0` disables).
+- **OpenAI path** — GPT-Live-1 (`VOICE_PROVIDER=openai`). Not OpenAI Realtime VAD (`/v1/realtime`, `semantic_vad`, `interrupt_response`).
+
+## Architecture
+
+SIP UAC + RTP (PCMA) + `VoiceAgentProvider` behind an HTTP/WS control plane (`HTTP_PORT`, default `43123`).
+
+**Reference live SIP:** [OVH softphone line](docs/providers/ovh.md). Other carriers: [docs/providers](docs/providers/README.md). Voice: [GPT-Live-1](docs/providers/openai.md), [Grok](docs/providers/xai-grok.md).
+
+## Call-agent integration
+
+The Call agent owns the SCRIPT and steers. It does **not** own SIP, RTP, or the voice WebSocket.
 
 ## Control plane
 
@@ -91,3 +116,4 @@ Live boot without `SIP_REGISTRAR` / `SIP_DOMAIN` / `SIP_USERNAME` / `SIP_PASSWOR
 - Auth on this control plane (keep the process private until the Call agent has a token story)
 - Backwards-compat shims for SCRIPT or event names
 - Personal numbers or SIP passwords in repo files
+- Permanent playout delay / constant prebuffer as the default latency tradeoff (see [Goals](#goals))
