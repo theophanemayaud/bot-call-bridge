@@ -57,7 +57,7 @@ Symptoms: first call works; later REGISTER refresh fails; or INVITE 403 after a 
 
 ## Voice side
 
-`POST /v1/voice/probe` — live Grok/OpenAI should return `ok`. 502/auth errors → `XAI_API_KEY` / `OPENAI_API_KEY`. Pass `{"provider":"openai"}` to probe OpenAI while defaulting to Grok.
+`POST /v1/voice/probe` — live Grok / GPT-Live should return `ok`. 502/auth errors → `XAI_API_KEY` / `OPENAI_API_KEY`. Pass `{"provider":"openai"}` to probe GPT-Live while defaulting to Grok. One-way noise on OpenAI: confirm Live `audio.format` includes `rate: 8000` for PCMA (do not copy the old Realtime omit-rate trick).
 
 ## After a fix
 

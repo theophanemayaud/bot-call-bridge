@@ -39,7 +39,7 @@ Planning tips:
 
 | Prefer Grok when… | Prefer OpenAI when… |
 |---|---|
-| You already have xAI Voice credits / Grok tooling | You want published token pricing + `semantic_vad` |
-| You want the original bridge path | You want ChatGPT Advanced Voice–like turn taking |
+| You already have xAI Voice credits / Grok tooling | You want published GPT-Live $/min pricing |
+| You want Realtime function tools (`session.update`) | You want full-duplex Live + client delegation |
 
 Switch with `VOICE_PROVIDER=` only — no code change.

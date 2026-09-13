@@ -59,7 +59,7 @@ def default_call_tools() -> list[ToolSpec]:
 
 
 def tools_as_openai_functions(tools: list[ToolSpec]) -> list[dict]:
-    """Shared function-tool shape used by Grok Voice and OpenAI Realtime."""
+    """Shared function-tool shape used by Grok Voice Realtime."""
     return [
         {
             "type": "function",
