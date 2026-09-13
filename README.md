@@ -79,7 +79,7 @@ See `skills/setup/SKILL.md` for the operator checklist and `skills/troubleshoot/
 | Live events | `WS /v1/calls/{id}/events` |
 | Health | `GET /health` · `GET /v1/status` |
 
-Call-agent contract: `AGENTS.md`. Sample SCRIPT: `examples/script.sample.json` (anonymized).
+Agent context (goals, ownership, what not to add) and Call-agent contract: [`AGENTS.md`](AGENTS.md). Sample SCRIPT: `examples/script.sample.json` (anonymized).
 
 ## Voice providers
 
