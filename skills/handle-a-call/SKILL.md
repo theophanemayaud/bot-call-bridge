@@ -53,6 +53,8 @@ Watch `call.state`: `dialing` → `ringing` / `bridged`. `failed` + `voice.error
 | Need a spoken line | `{ "mode": "speak" }` (Grok `force_message`) |
 | `tool_call` `hangup` | Bridge BYEs after goodbye grace — report the `summary` / `reason` |
 | You decide to stop | `POST …/hangup` `{ "reason": "orchestrator" }` |
+| Voicemail | SCRIPT + Live prompts: short message (who + why), goodbye, hang up. Do not wait in silence |
+| Idle (`idle_timeout`) | Bridge BYEs after `CALL_IDLE_TIMEOUT_SECONDS` (default 30) with no user/assistant speech. Comfort-noise RTP does not count. `0` disables |
 
 Do not tell the callee about tool names or the control plane.
 

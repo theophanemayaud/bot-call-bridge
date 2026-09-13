@@ -11,6 +11,8 @@ This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/
 | Codec | Native **PCMA** 8 kHz both ways (no local resample). Live **requires** `audio.format.rate` on `audio/pcma` |
 | Turn taking | Model + prompt (Backchannel / Interruption / Silence policies). No Realtime VAD knobs |
 | Tools | Client delegation (`delegation.type=client`) → `session.delegation.created` → `ask_orchestrator` / `hangup` |
+| Voicemail | Live instructions: short message (who + why), goodbye, then delegate hangup. Do not sit silent after the greeting |
+| Idle hangup | Bridge-wide `CALL_IDLE_TIMEOUT_SECONDS` (default 30) — not Live-specific. See `AGENTS.md` |
 | Steers | `session.instructions.append` (steer) / verbatim disclosure via instructions.append |
 | Orchestrator answers | `session.commentary.append` (spoken, may paraphrase) |
 | Probe | `POST /v1/voice/probe` |
