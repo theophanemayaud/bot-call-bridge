@@ -4,9 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlencode
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -18,20 +18,57 @@ from call_bridge.voice.provider import (
     VoiceEvent,
     VoiceSessionConfig,
 )
-from call_bridge.voice.tools import tools_as_openai_functions
 
 log = logging.getLogger(__name__)
 
-_ASSISTANT_TRANSCRIPT_EVENTS = {
-    "response.output_audio_transcript.delta",
-    "response.output_audio_transcript.done",
-    "response.audio_transcript.delta",
-    "response.audio_transcript.done",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.text.delta",
-    "response.text.done",
-}
+# Live commentary/instructions appends are capped at ~500 tokens.
+_APPEND_CHAR_LIMIT = 1800
+_CONNECT_TIMEOUT_SECONDS = 15.0
+_CLOSE_TIMEOUT_SECONDS = 2.0
+
+_HANGUP_MARKERS = (
+    "au revoir",
+    "raccroche",
+    "je te laisse",
+    "je vous laisse",
+    "goodbye",
+    "good bye",
+    "hanging up",
+    "hang up",
+    "i'll hang up",
+    "i will hang up",
+    "voicemail",
+    "répondeur",
+    "repondeur",
+)
+
+_LIVE_INSTRUCTION_PREFIX = """You are a calm, friendly voice agent on a live outbound phone call.
+Speak naturally, at an unhurried pace. Be clear and direct. If the callee is frustrated, acknowledge it briefly and focus on the next helpful step.
+Prefer the callee's language when they speak; default to the SCRIPT language.
+
+Backchannel policy: Use moderate backchannels (mm-hmm, oui, d'accord, I see). Acknowledge naturally without competing with the main response.
+
+Interruption policy: Stop speaking when the callee interrupts. Listen to what they say.
+
+Silence and noise policy: Keep listening while the callee pauses to think. Do not treat a cough, hold music, a ringtone, or nearby conversation as a new request.
+
+Delegation policy:
+Backend tools:
+- ask_orchestrator: facts, decisions, and next steps the Call/orchestrator must provide. You do not have those facts.
+- hangup: end the phone call after you have already spoken an audible goodbye.
+
+Delegate to the backend when:
+- You need a fact, confirmation, or next step you do not have.
+- The conversation is complete, the callee asks to stop, or you reached voicemail after the fallback message — speak goodbye first, then delegate so the line can hang up.
+
+Do not delegate to the backend when:
+- You can answer from the SCRIPT, disclosure, or a still-current orchestrator result.
+- You only need a brief clarification from the callee.
+
+Delegate before giving an answer that depends on backend work.
+Do not invent facts while waiting.
+Do not mention backend, tools, or delegation to the callee.
+"""
 
 
 def _format_type(fmt: AudioFormat) -> str:
@@ -42,91 +79,95 @@ def _format_type(fmt: AudioFormat) -> str:
     }[fmt.encoding]
 
 
-def _format_block(fmt: AudioFormat) -> dict[str, Any]:
-    # OpenAI GA: audio/pcma and audio/pcmu reject a nested "rate" field
-    # (unknown_parameter). Including rate leaves the session on default
-    # audio/pcm @ 24 kHz while SIP still plays 8 kHz a-law → severe static.
-    block: dict[str, Any] = {"type": _format_type(fmt)}
-    if fmt.encoding == "pcm16":
-        block["rate"] = fmt.sample_rate_hz
-    return block
+def live_audio_format(fmt: AudioFormat) -> dict[str, Any]:
+    """Shared Live input/output format. G.711 MUST include rate (unlike old Realtime)."""
+    return {"type": _format_type(fmt), "rate": fmt.sample_rate_hz}
 
 
-def build_openai_session_payload(
+def compose_live_instructions(config: VoiceSessionConfig) -> str:
+    """Short Live policies + SCRIPT mission. Keep policy labels from the Live prompting guide."""
+    script = (config.instructions or "").strip()
+    if script:
+        return f"{_LIVE_INSTRUCTION_PREFIX.rstrip()}\n\nSCRIPT\n{script}"
+    return _LIVE_INSTRUCTION_PREFIX.strip()
+
+
+def build_live_session_payload(
     config: VoiceSessionConfig,
     *,
     model: str,
     default_voice: str,
-    transcribe_model: str | None = None,
 ) -> dict[str, Any]:
-    """GA Realtime session.update body (type=realtime, nested audio, tools)."""
-    turn: dict[str, Any] | None
-    kind = config.turn_detection.kind
-    if kind == "server_vad":
-        turn = {
-            "type": "server_vad",
-            "create_response": True,
-            "interrupt_response": config.turn_detection.interrupt_response,
-        }
-        if config.turn_detection.threshold is not None:
-            turn["threshold"] = config.turn_detection.threshold
-        if config.turn_detection.silence_duration_ms is not None:
-            turn["silence_duration_ms"] = config.turn_detection.silence_duration_ms
-        if config.turn_detection.prefix_padding_ms is not None:
-            turn["prefix_padding_ms"] = config.turn_detection.prefix_padding_ms
-    elif kind == "semantic_vad":
-        # Closer to ChatGPT Advanced Voice: turn boundaries from the model,
-        # not raw silence. Still optional barge-in via interrupt_response.
-        turn = {
-            "type": "semantic_vad",
-            "create_response": True,
-            "interrupt_response": config.turn_detection.interrupt_response,
-        }
-        if config.turn_detection.eagerness:
-            turn["eagerness"] = config.turn_detection.eagerness
-    else:
-        turn = None
-
-    input_audio: dict[str, Any] = {
-        "format": _format_block(config.audio_in),
-        "turn_detection": turn,
-    }
-    # Ignore Grok-only transcribe models passed from CallSession.
-    asr = transcribe_model or config.transcribe_model
-    if asr and not asr.startswith("grok"):
-        transcription: dict[str, Any] = {"model": asr}
-        if config.language:
-            transcription["language"] = config.language
-        input_audio["transcription"] = transcription
-
+    """GPT-Live session.start body (client delegation, shared PCMA format)."""
+    fmt = config.audio_in
     return {
-        "type": "realtime",
         "model": model,
-        "output_modalities": ["audio"],
-        "instructions": config.instructions,
-        "tool_choice": "auto",
-        "tools": tools_as_openai_functions(config.tools),
+        "instructions": compose_live_instructions(config),
         "audio": {
-            "input": input_audio,
-            "output": {
-                "format": _format_block(config.audio_out),
-                "voice": config.voice or default_voice,
-            },
+            "format": live_audio_format(fmt),
+            "output": {"voice": config.voice or default_voice},
         },
+        "delegation": {"type": "client"},
     }
 
 
-class OpenAIRealtimeProvider(VoiceAgentProvider):
-    """OpenAI Realtime WebSocket (session.update / server_vad / function tools / PCMA)."""
+def classify_live_delegation(*, last_assistant: str, recent: str) -> tuple[str, dict[str, Any]]:
+    """Map a client-delegation notice onto hangup or ask_orchestrator.
+
+    Live `session.delegation.created` has metadata only — no tool name or args.
+    The last assistant utterance is the best hangup signal after a spoken goodbye.
+    """
+    text = (last_assistant or "").strip().lower()
+    if text and any(marker in text for marker in _HANGUP_MARKERS):
+        return "hangup", {
+            "reason": "agent",
+            "summary": (last_assistant or recent)[-240:],
+        }
+    return "ask_orchestrator", {
+        "question": "The live model delegated. What should I do or say next?",
+        "context": recent,
+        "urgency": "normal",
+    }
+
+
+def _speakable_tool_output(output: dict[str, Any]) -> str:
+    for key in ("answer", "instruction", "summary"):
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return json.dumps(output, ensure_ascii=False)
+
+
+def _clip(text: str, limit: int = _APPEND_CHAR_LIMIT) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _error_message(event: dict[str, Any]) -> str:
+    err = event.get("error") or event
+    if isinstance(err, dict):
+        return str(err.get("message") or err)
+    return str(err)
+
+
+class OpenAILiveProvider(VoiceAgentProvider):
+    """OpenAI GPT-Live-1 WebSocket (session.start / client delegation / PCMA 8 kHz)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._ws: ClientConnection | None = None
         self._events: asyncio.Queue[VoiceEvent] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
-        self._closed = asyncio.Event()
-        self._pending_tool_calls = 0
+        self._ready: asyncio.Future[dict[str, Any]] | None = None
+        self._server_closed = asyncio.Event()
         self._config: VoiceSessionConfig | None = None
+        self._session_id: str | None = None
+        self._delegations: dict[str, str] = {}
+        self._fragments: list[tuple[str, str]] = []
+        self._user_speaking = False
+        self._closing = False
 
     @property
     def name(self) -> str:
@@ -136,9 +177,13 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
         if not self._settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is empty")
         self._config = config
-        query = urlencode({"model": self._settings.openai_realtime_model})
-        url = f"{self._settings.openai_realtime_url}?{query}"
-        log.info("connecting openai realtime %s", self._settings.openai_realtime_model)
+        self._closing = False
+        self._server_closed.clear()
+        self._delegations.clear()
+        self._fragments.clear()
+        self._user_speaking = False
+        url = self._settings.openai_live_url
+        log.info("connecting openai gpt-live %s", self._settings.openai_live_model)
         self._ws = await websockets.connect(
             url,
             additional_headers={
@@ -148,24 +193,37 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
             ping_interval=20,
             ping_timeout=20,
         )
-        self._closed.clear()
-        self._reader = asyncio.create_task(self._read_loop(), name="openai-reader")
+        loop = asyncio.get_running_loop()
+        self._ready = loop.create_future()
+        self._reader = asyncio.create_task(self._read_loop(), name="openai-live-reader")
         await self._send(
             {
-                "type": "session.update",
-                "session": build_openai_session_payload(
+                "type": "session.start",
+                "event_id": _event_id("start"),
+                "session": build_live_session_payload(
                     config,
-                    model=self._settings.openai_realtime_model,
+                    model=self._settings.openai_live_model,
                     default_voice=self._settings.openai_voice,
-                    transcribe_model=self._settings.openai_transcribe_model or None,
                 ),
             }
         )
+        try:
+            started = await asyncio.wait_for(asyncio.shield(self._ready), timeout=_CONNECT_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise RuntimeError("GPT-Live session.started timed out") from exc
+        session = started.get("session") or {}
+        self._session_id = session.get("id")
         if config.speak_first:
             await self.speak_verbatim(config.speak_first, interruptible=False)
 
     async def close(self) -> None:
-        self._closed.set()
+        self._closing = True
+        if self._ws is not None and self._live_started() and not self._server_closed.is_set():
+            try:
+                await self._send({"type": "session.close", "event_id": _event_id("close")})
+                await asyncio.wait_for(self._server_closed.wait(), timeout=_CLOSE_TIMEOUT_SECONDS)
+            except Exception:
+                pass
         if self._reader:
             self._reader.cancel()
             try:
@@ -182,11 +240,13 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
         await self._events.put(VoiceEvent(type="closed"))
 
     async def send_audio(self, frame: bytes) -> None:
-        if not frame or self._ws is None:
+        if not frame or self._ws is None or self._closing:
+            return
+        if not self._live_started():
             return
         await self._send(
             {
-                "type": "input_audio_buffer.append",
+                "type": "session.input_audio.append",
                 "audio": base64.b64encode(frame).decode("ascii"),
             }
         )
@@ -194,41 +254,26 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
     async def inject_guideline(self, text: str) -> None:
         if self._ws is None:
             raise RuntimeError("voice session is not connected")
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": f"[ORCHESTRATOR STEER — do not read this aloud] {text}",
-                        }
-                    ],
-                },
-            }
-        )
-        await self._send(
-            {
-                "type": "response.create",
-                "response": {"instructions": text},
-            }
+        await self._append(
+            "session.instructions.append",
+            f"[ORCHESTRATOR STEER — do not read this aloud] {text}",
+            delegation_id=None,
         )
 
     async def speak_verbatim(self, text: str, *, interruptible: bool = False) -> None:
-        """Speak a fixed line. OpenAI has no force_message; use response.create + instructions."""
+        """Request a fixed spoken line. Live has no force_message; instructions.append is the disclosure path."""
         if self._ws is None:
             raise RuntimeError("voice session is not connected")
-        instructions = (
-            "Say exactly the following text verbatim, with no additions or omissions:\n"
-            f"{text}"
+        del interruptible  # Live duplex yield is model + prompt; no interrupt_response flag.
+        await self._append(
+            "session.instructions.append",
+            (
+                "Immediately say the following text exactly and in full, then pause and listen. "
+                "Do not add a greeting or extra words:\n"
+                f"{text}"
+            ),
+            delegation_id=None,
         )
-        response: dict[str, Any] = {"instructions": instructions}
-        if not interruptible:
-            # Disclosure / speak-first: ignore prior conversation context.
-            response["input"] = []
-        await self._send({"type": "response.create", "response": response})
 
     async def submit_tool_result(
         self,
@@ -239,19 +284,31 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
     ) -> None:
         if self._ws is None:
             raise RuntimeError("voice session is not connected")
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(output),
-                },
-            }
+        delegation_id = call_id if call_id in self._delegations else None
+        self._delegations.pop(call_id, None)
+        if not continue_response:
+            await self._append(
+                "session.instructions.append",
+                "The application is hanging up the call now. Do not continue the conversation.",
+                delegation_id=delegation_id,
+            )
+            return
+        if output.get("error") == "orchestrator_timeout" or output.get("ok") is False:
+            fallback = _speakable_tool_output(output)
+            await self._append(
+                "session.instructions.append",
+                (
+                    "The orchestrator could not complete this request. "
+                    f"{fallback} Use a SCRIPT fallback. Do not invent facts."
+                ),
+                delegation_id=delegation_id,
+            )
+            return
+        await self._append(
+            "session.commentary.append",
+            _speakable_tool_output(output),
+            delegation_id=delegation_id,
         )
-        self._pending_tool_calls = max(0, self._pending_tool_calls - 1)
-        if continue_response and self._pending_tool_calls == 0:
-            await self._send({"type": "response.create"})
 
     async def events(self) -> AsyncIterator[VoiceEvent]:
         while True:
@@ -259,6 +316,16 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
             yield event
             if event.type == "closed":
                 return
+
+    async def _append(self, type_: str, content: str, *, delegation_id: str | None) -> None:
+        await self._send(
+            {
+                "type": type_,
+                "event_id": _event_id("append"),
+                "delegation_id": delegation_id,
+                "content": _clip(content),
+            }
+        )
 
     async def _send(self, payload: dict[str, Any]) -> None:
         if self._ws is None:
@@ -277,80 +344,119 @@ class OpenAIRealtimeProvider(VoiceAgentProvider):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("openai websocket ended: %s", exc)
+            log.warning("openai live websocket ended: %s", exc)
+            self._fail_ready(exc)
             await self._events.put(VoiceEvent(type="error", payload={"message": str(exc)}))
         finally:
+            self._server_closed.set()
             await self._events.put(VoiceEvent(type="closed"))
+
+    def _live_started(self) -> bool:
+        return (
+            self._ready is not None
+            and self._ready.done()
+            and self._ready.exception() is None
+        )
+
+    def _fail_ready(self, exc: BaseException) -> None:
+        if self._ready is not None and not self._ready.done():
+            self._ready.set_exception(exc)
+
+    def _recent_conversation(self, *, max_chars: int = 800) -> str:
+        lines: list[str] = []
+        for role, text in self._fragments[-24:]:
+            piece = text.strip()
+            if piece:
+                lines.append(f"{role}: {piece}")
+        blob = "\n".join(lines)
+        if len(blob) > max_chars:
+            return blob[-max_chars:]
+        return blob
+
+    def _last_role_text(self, role: str) -> str:
+        chunks: list[str] = []
+        for frag_role, text in reversed(self._fragments):
+            if frag_role != role:
+                if chunks:
+                    break
+                continue
+            chunks.append(text)
+        chunks.reverse()
+        return "".join(chunks)
+
+    async def _note_transcript(self, role: str, text: str) -> None:
+        if text:
+            self._fragments.append((role, text))
+        await self._events.put(
+            VoiceEvent(
+                type="transcript",
+                payload={"role": role, "text": text, "final": False},
+            )
+        )
 
     async def _handle_server_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type", "")
-        if kind == "session.updated" or kind == "session.created":
+        if kind == "session.started":
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_result(event)
             await self._events.put(VoiceEvent(type="session.ready", payload=event))
             return
-        if kind in {"response.output_audio.delta", "response.audio.delta"}:
+        if kind == "session.closed":
+            self._server_closed.set()
+            usage = event.get("usage")
+            if usage:
+                log.info("openai live session closed usage=%s reason=%s", usage, event.get("reason"))
+            return
+        if kind == "session.output_audio.delta":
             delta = event.get("delta") or event.get("audio")
             if delta:
+                self._user_speaking = False
                 await self._events.put(
                     VoiceEvent(type="audio.out", payload={"pcm": base64.b64decode(delta)})
                 )
             return
-        if kind == "input_audio_buffer.speech_started":
-            await self._events.put(VoiceEvent(type="speech.started", payload=event))
+        if kind == "session.input_transcript.delta":
+            text = event.get("delta") or event.get("text") or ""
+            if not self._user_speaking:
+                self._user_speaking = True
+                # Flush queued assistant playout on barge-in (Live has no speech.started).
+                await self._events.put(VoiceEvent(type="speech.started", payload=event))
+            await self._note_transcript("user", text)
             return
-        if kind == "input_audio_buffer.speech_stopped":
-            await self._events.put(VoiceEvent(type="speech.stopped", payload=event))
+        if kind == "session.output_transcript.delta":
+            self._user_speaking = False
+            text = event.get("delta") or event.get("text") or ""
+            await self._note_transcript("assistant", text)
             return
-        if kind in {
-            "conversation.item.input_audio_transcription.updated",
-            "conversation.item.input_audio_transcription.completed",
-            "conversation.item.input_audio_transcription.delta",
-        }:
-            transcript = event.get("transcript") or event.get("delta") or event.get("text") or ""
-            final = kind.endswith("completed")
-            await self._events.put(
-                VoiceEvent(
-                    type="transcript",
-                    payload={"role": "user", "text": transcript, "final": final},
-                )
+        if kind == "session.delegation.created":
+            delegation = event.get("delegation") or {}
+            delegation_id = delegation.get("id") or event.get("delegation_id")
+            if not delegation_id:
+                log.warning("openai live delegation missing id: %s", event)
+                return
+            tool, arguments = classify_live_delegation(
+                last_assistant=self._last_role_text("assistant"),
+                recent=self._recent_conversation(),
             )
-            return
-        if kind in _ASSISTANT_TRANSCRIPT_EVENTS:
-            text = event.get("delta") or event.get("transcript") or event.get("text") or ""
-            final = kind.endswith(".done")
-            if text or final:
-                await self._events.put(
-                    VoiceEvent(
-                        type="transcript",
-                        payload={"role": "assistant", "text": text, "final": final},
-                    )
-                )
-            return
-        if kind == "response.function_call_arguments.done":
-            self._pending_tool_calls += 1
-            arguments = event.get("arguments") or "{}"
-            if isinstance(arguments, str):
-                try:
-                    parsed = json.loads(arguments)
-                except json.JSONDecodeError:
-                    parsed = {"raw": arguments}
-            else:
-                parsed = arguments
+            self._delegations[delegation_id] = tool
             await self._events.put(
                 VoiceEvent(
                     type="tool_call",
                     payload={
-                        "tool": event.get("name"),
-                        "tool_call_id": event.get("call_id"),
-                        "arguments": parsed,
+                        "tool": tool,
+                        "tool_call_id": delegation_id,
+                        "arguments": arguments,
                     },
                 )
             )
             return
-        if kind == "response.done":
-            await self._events.put(VoiceEvent(type="response.done", payload=event))
-            return
         if kind == "error":
-            await self._events.put(
-                VoiceEvent(type="error", payload={"message": event.get("error") or event})
-            )
+            message = _error_message(event)
+            if self._ready is not None and not self._ready.done():
+                self._ready.set_exception(RuntimeError(message))
+            await self._events.put(VoiceEvent(type="error", payload={"message": message}))
             return
+
+
+def _event_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"

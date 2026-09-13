@@ -1,42 +1,47 @@
-# OpenAI Realtime (voice)
+# OpenAI GPT-Live-1 (voice)
 
-Set `VOICE_PROVIDER=openai` and paste `OPENAI_API_KEY`. Leave the other OpenAI env defaults unless you know you need a different model/voice.
+Set `VOICE_PROVIDER=openai` and paste `OPENAI_API_KEY`. Leave the other OpenAI env defaults unless you know you need a different voice.
+
+This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/sessions`). It is not OpenAI Realtime (`/v1/realtime`, `session.update`, `semantic_vad`, `interrupt_response`). SIP stays on this process — do not switch the phone hop to OpenAI direct SIP.
 
 ## Capabilities (this bridge)
 
 | Feature | Status |
 |---|---|
-| Codec | Native **PCMA** 8 kHz both ways (no local resample) |
-| Turn taking | Default **`semantic_vad`** (`eagerness=auto`) — closer to ChatGPT Advanced Voice than silence-only VAD |
-| Barge-in / AVM | `interrupt_response=true` by default — cancels assistant speech when you talk so it can answer (set `false` only for live-translate overlap) |
-| Tools | `ask_orchestrator`, `hangup` (audible goodbye then BYE) |
-| Disclosure | `speak_first` / SCRIPT disclosure via `response.create` |
+| Codec | Native **PCMA** 8 kHz both ways (no local resample). Live **requires** `audio.format.rate` on `audio/pcma` |
+| Turn taking | Model + prompt (Backchannel / Interruption / Silence policies). No Realtime VAD knobs |
+| Tools | Client delegation (`delegation.type=client`) → `session.delegation.created` → `ask_orchestrator` / `hangup` |
+| Steers | `session.instructions.append` (steer) / verbatim disclosure via instructions.append |
+| Orchestrator answers | `session.commentary.append` (spoken, may paraphrase) |
 | Probe | `POST /v1/voice/probe` |
 
-**PCMA pitfall:** OpenAI GA rejects nested `audio.input.format.rate` on `audio/pcma`. This repo omits `rate` for G.711. Sending `rate` leaves the session on PCM 24 kHz → severe static on the phone.
+**PCMA pitfall:** Live **requires** `{"type":"audio/pcma","rate":8000}`. Omitting `rate` (the old Realtime GA trick) is wrong here. SIP still forwards 8 kHz a-law as-is.
+
+Live does **not** emit `response.audio.done` / `response.done` for spoken turns. Downlink playout is whatever `session.output_audio.delta` chunks have been queued. Barge-in flushes that queue when the first `session.input_transcript.delta` arrives.
 
 ## Defaults in `.env.example`
 
 ```bash
 VOICE_PROVIDER=openai
 OPENAI_API_KEY=
-OPENAI_REALTIME_URL=wss://api.openai.com/v1/realtime
-OPENAI_REALTIME_MODEL=gpt-realtime
+OPENAI_LIVE_URL=wss://api.openai.com/v1/live/sessions
+OPENAI_LIVE_MODEL=gpt-live-1
 OPENAI_VOICE=marin
-OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
 ```
+
+`OPENAI_REALTIME_*` and `OPENAI_TRANSCRIBE_MODEL` are gone. `VOICE_PROVIDER=openai` means Live-1.
 
 ## Example costs (guide — verify on [OpenAI pricing](https://platform.openai.com/docs/pricing))
 
-Realtime bills **audio tokens**, not a flat $/min. Rough planning conversions (duration → tokens): ~1 input audio token / 100 ms of user audio, ~1 output audio token / 50 ms of model audio.
+GPT-Live-1 voice is billed at about **$0.05 per minute**, per second (not rounded up). Delegated backend work (Call/orchestrator, or a future Responses backend) is **separate**.
 
-| Model family (list prices per 1M audio tokens) | Listen (user) | Speak (model) | Ballpark full-duplex minute* |
-|---|---|---|---|
-| Flagship realtime (e.g. gpt-realtime / 2.1 class) | ~$32 / 1M ≈ **~$0.019/min** heard | ~$64 / 1M ≈ **~$0.077/min** spoken | **~$0.05–0.10/min** typical mixed call |
-| Mini realtime | ~$10 / 1M ≈ **~$0.006/min** | ~$20 / 1M ≈ **~$0.024/min** | **~$0.015–0.03/min** |
+| Item | Ballpark |
+|---|---|
+| Voice session (`gpt-live-1`) | **~$0.05/min** of session duration |
+| Client-delegation / orchestrator | Your Call agent / other backend, not OpenAI voice minutes |
 
-\*Order of magnitude for budgeting only. Silence under VAD often bills little/no input. Optional transcription is a separate rate card. Always re-check the live pricing page before production.
+Always re-check the live pricing page before production.
 
 ## SIP cost is separate
 
-Phone minutes are billed by the SIP carrier (see [ovh.md](ovh.md)). OpenAI charges stack on top.
+Phone minutes are billed by the SIP carrier (see [ovh.md](ovh.md)). OpenAI charges stack on top. This bridge remains a **server audio bridge** (OVH SIP + RTP PCMA ↔ Live WebSocket).

@@ -33,10 +33,9 @@ class Settings(BaseSettings):
     xai_transcribe_model: str = "grok-transcribe"
 
     openai_api_key: str = ""
-    openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
-    openai_realtime_model: str = "gpt-realtime"
+    openai_live_url: str = "wss://api.openai.com/v1/live/sessions"
+    openai_live_model: str = "gpt-live-1"
     openai_voice: str = "marin"
-    openai_transcribe_model: str = "gpt-4o-mini-transcribe"
 
     # Provider-specific. Leave empty in mock mode. Live requires registrar + domain + creds.
     sip_registrar: str = ""
