@@ -105,6 +105,10 @@ def test_compose_live_instructions_keeps_policy_labels():
     assert "ask_orchestrator" in text
     assert "hangup" in text
     assert "Mission: confirm Tuesday." in text
+    assert "voicemail" in text.lower()
+    assert "short message" in text
+    assert "delegate hangup" in text
+    assert "Do not sit in silence after the greeting." in text
 
 
 def test_classify_live_delegation_hangup_from_goodbye():

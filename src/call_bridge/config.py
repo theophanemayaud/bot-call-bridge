@@ -61,6 +61,9 @@ class Settings(BaseSettings):
 
     tool_timeout_seconds: float = 20.0
     hangup_grace_seconds: float = 2.5
+    # No user transcript and no assistant transcript/audio for this long → BYE.
+    # Comfort-noise RTP does not count. 0 disables. max_duration is still the cap.
+    call_idle_timeout_seconds: float = Field(default=30.0, ge=0)
     max_concurrent_calls: int = 1
 
     def sip_proxy_host(self) -> str:

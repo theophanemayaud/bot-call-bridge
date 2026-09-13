@@ -60,7 +60,11 @@ Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback a
 
 ### `hangup`
 
-The model calls `hangup`; the bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
+The model calls `hangup` (Grok / function tools) or Live client-delegates after a spoken goodbye. The bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
+
+**Voicemail:** SCRIPT + Live instructions tell the agent to leave a short message (who + why), say goodbye, then hang up. Do not sit in silence after a greeting.
+
+**Idle safety net:** `CALL_IDLE_TIMEOUT_SECONDS` (default 30, `0` disables) BYEs any call with no user transcript and no assistant transcript/audio for that long (`hangup_reason=idle_timeout`). Comfort-noise RTP does not count. `max_duration` remains the hard cap.
 
 ## Voice providers
 

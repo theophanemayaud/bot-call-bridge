@@ -59,5 +59,5 @@ def test_rtp_roundtrip():
 
 def test_dial_request_uri_rewrites_plus():
     assert dial_request_uri("+33XXXXXXXXX", "sip.voipwise.com") == (
-        "sip:0033142867800@sip.voipwise.com"
+        "sip:0033XXXXXXXXX@sip.voipwise.com"
     )
