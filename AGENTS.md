@@ -67,7 +67,7 @@ The model calls `hangup`; the bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SI
 `VoiceAgentProvider` in `src/call_bridge/voice/provider.py` is the only interface SIP/RTP talks to.
 
 - **Grok** — implemented.
-- **OpenAI Realtime** — implemented (`VOICE_PROVIDER=openai`, PCMA duplex).
+- **OpenAI GPT-Live-1** — implemented (`VOICE_PROVIDER=openai`, PCMA duplex, client delegation).
 - **mock** — `BRIDGE_MODE=mock`.
 
 Native wire audio is **PCMA 8 kHz**. Do not add a resample path unless a future voice provider cannot take PCMA.

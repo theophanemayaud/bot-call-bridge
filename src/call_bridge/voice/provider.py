@@ -14,7 +14,7 @@ class AudioFormat:
     """Provider-agnostic wire format for the virtual mic/speaker.
 
     SIP/RTP on this bridge is G.711 a-Law @ 8 kHz. Providers that accept
-    native PCMA (Grok Voice, OpenAI Realtime) should keep this as-is.
+    native PCMA (Grok Voice, OpenAI GPT-Live) should keep this as-is.
     """
 
     encoding: AudioEncoding = "pcma"
@@ -24,18 +24,18 @@ class AudioFormat:
 
 @dataclass(slots=True, frozen=True)
 class TurnDetection:
-    # semantic_vad ≈ ChatGPT Advanced Voice turn-taking (model-ish).
-    # server_vad = silence energy. none = orchestrator must response.create.
+    # Grok Realtime only. GPT-Live has no turn_detection / interrupt_response;
+    # duplex yield is model + prompt.
+    # server_vad = silence energy. semantic_vad is unused on the Live path.
+    # none = Grok omits VAD (orchestrator / model must continue).
     kind: Literal["server_vad", "semantic_vad", "none"] = "semantic_vad"
     threshold: float | None = None
     silence_duration_ms: int | None = 500
     prefix_padding_ms: int | None = 300
     idle_timeout_ms: int | None = None
-    # OpenAI semantic_vad eagerness: low|medium|high|auto
+    # Unused on GPT-Live. Kept for Grok / shared VoiceSessionConfig.
     eagerness: str | None = "auto"
-    # True = AVM-style: cancel assistant speech when callee talks so a new
-    # response can answer them (needed with create_response / semantic_vad).
-    # False = overlap mode (live translate) — do NOT steer/create while speaking.
+    # Unused on GPT-Live. Grok Realtime barge-in when using server_vad.
     interrupt_response: bool = True
 
 

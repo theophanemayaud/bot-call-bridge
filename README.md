@@ -1,12 +1,12 @@
 # Bot Call Bridge (`bot-call-bridge`)
 
-Headless phone bridge: **SIP** ↔ **OpenAI Realtime** or **xAI Grok Voice**. The far-end of the call talks to the voice model. There is no local microphone or speaker.
+Headless phone bridge: **SIP** ↔ **OpenAI GPT-Live-1** or **xAI Grok Voice**. The far-end of the call talks to the voice model. There is no local microphone or speaker.
 
 Switch voice with `VOICE_PROVIDER=openai|grok|mock` — paste only the matching API key; models/voices/URLs ship with working defaults.
 
 An orchestrator (or a Grok Bot **Call** agent) posts a SCRIPT — who to call, language, goals, constraints, fallbacks, AI disclosure. This process registers to **your** SIP provider, dials, and pipes G.711 a-Law RTP to/from the voice WebSocket as a virtual mic/speaker.
 
-SIP is provider-agnostic (`SIP_REGISTRAR` / `SIP_PROXY` / `SIP_DOMAIN`). Voice is provider-agnostic behind `VoiceAgentProvider` (Grok and OpenAI Realtime for PCMA duplex).
+SIP is provider-agnostic (`SIP_REGISTRAR` / `SIP_PROXY` / `SIP_DOMAIN`). Voice is provider-agnostic behind `VoiceAgentProvider` (Grok Realtime and OpenAI GPT-Live for PCMA duplex).
 
 **Reference live path** for a cloud / Grok-bot box: **[OVH SIP](docs/providers/ovh.md)** (softphone line, `sip3.ovh.fr`-class registrar). VoipWise is documented but often rejects datacenter IPs — see [providers](docs/providers/README.md).
 
@@ -18,7 +18,7 @@ flowchart LR
   sess --> voice[VoiceAgentProvider]
   sip -->|REGISTER INVITE BYE + RTP PCMA| carrier[SIP provider]
   voice -->|WSS session.update + audio| grok[Grok Voice]
-  voice -->|WSS session.update + PCMA| oai[OpenAI Realtime]
+  voice -->|WSS session.start + PCMA| oai[OpenAI GPT-Live]
 ```
 
 ## Repo map
@@ -84,7 +84,7 @@ Call-agent contract: `AGENTS.md`. Sample SCRIPT: `examples/script.sample.json` (
 ## Voice providers
 
 - **Grok** — `wss://api.x.ai/v1/realtime`, native `audio/pcma`, `server_vad`, function tools, `force_message`.
-- **OpenAI Realtime** — `wss://api.openai.com/v1/realtime`, native `audio/pcma` duplex, `server_vad`, hangup / ask_orchestrator function tools. Set `VOICE_PROVIDER=openai` plus `OPENAI_API_KEY`, optional `OPENAI_REALTIME_MODEL` / `OPENAI_VOICE` (e.g. `marin`, `cedar`). `speak_verbatim` uses `response.create` instructions (no Grok `force_message`).
+- **OpenAI GPT-Live-1** — `wss://api.openai.com/v1/live/sessions`, native `audio/pcma` @ 8 kHz (rate required), client delegation for hangup / ask_orchestrator. Set `VOICE_PROVIDER=openai` plus `OPENAI_API_KEY`, optional `OPENAI_LIVE_MODEL` / `OPENAI_VOICE` (e.g. `marin`, `cedar`). `speak_verbatim` uses `session.instructions.append` (no Grok `force_message`).
 
 ## Add a VoIP provider
 
