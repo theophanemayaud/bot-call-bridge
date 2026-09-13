@@ -41,6 +41,6 @@ def test_requires_disclosure_and_goals():
 
 
 def test_normalize_plus_to_00():
-    assert normalize_dial_user("+33XXXXXXXXX") == "0033123456789"
+    assert normalize_dial_user("+33XXXXXXXXX") == "0033XXXXXXXXX"
     assert normalize_dial_user("0033123456789") == "0033123456789"
     assert normalize_dial_user("+33 1 23 45 67 89") == "0033123456789"
