@@ -94,5 +94,6 @@ Write `docs/providers/<name>.md` using the [checklist](docs/providers/README.md)
 
 - One concurrent call (`MAX_CONCURRENT_CALLS=1`)
 - Outbound only, UDP SIP, PCMA only
+- Idle hangup after `CALL_IDLE_TIMEOUT_SECONDS` (default 30; `0` disables) with no user/assistant voice activity
 - Control plane unauthenticated — bind privately
 - No Twilio/Telnyx required

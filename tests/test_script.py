@@ -21,6 +21,16 @@ def test_sample_script_validates():
     assert "ask_orchestrator" in text
 
 
+def test_script_instructions_require_short_voicemail_then_hangup():
+    script = CallScript.model_validate(SAMPLE)
+    text = script.build_instructions()
+    assert "VOICEMAIL" in text
+    assert "short message" in text
+    assert "who you are" in text
+    assert "hang up" in text
+    assert "Do not sit in silence after the greeting." in text
+
+
 def test_requires_disclosure_and_goals():
     bad = {
         "call": {"to": "+33XXXXXXXXX", "language": "fr"},

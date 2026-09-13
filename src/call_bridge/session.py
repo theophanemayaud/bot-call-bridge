@@ -13,10 +13,27 @@ from call_bridge.script import CallScript
 from call_bridge.sip.endpoint import SipEndpoint
 from call_bridge.sip.protocol import PCMA_FRAME_BYTES, PCMA_SILENCE
 from call_bridge.voice.factory import create_voice_provider
-from call_bridge.voice.provider import VoiceAgentProvider, VoiceSessionConfig
+from call_bridge.voice.provider import VoiceAgentProvider, VoiceEvent, VoiceSessionConfig
 from call_bridge.voice.tools import default_call_tools
 
 log = logging.getLogger(__name__)
+
+
+def voice_event_is_activity(event: VoiceEvent) -> bool:
+    """True when a voice-layer event should reset the idle timer.
+
+    User transcript / barge-in and assistant transcript or outbound audio count.
+    Continuous SIP comfort-noise RTP does not — the session never sees those as
+    voice events.
+    """
+    if event.type == "audio.out":
+        return bool(event.payload.get("pcm"))
+    if event.type == "speech.started":
+        return True
+    if event.type == "transcript":
+        text = event.payload.get("text")
+        return bool(text) or event.payload.get("event") == "speech_started"
+    return False
 
 CallState = Literal[
     "starting",
@@ -173,6 +190,7 @@ class _LiveCall:
         self._hangup_reason = "local"
         self._downlink: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
         self._play_buf = bytearray()
+        self._last_activity = time.monotonic()
 
     async def run(self) -> None:
         record = self.record
@@ -244,12 +262,41 @@ class _LiveCall:
         if not pending.future.done():
             pending.future.set_result(output)
 
-    async def _watch_hangup_or_timeout(self, max_seconds: int) -> None:
+    def _mark_activity(self) -> None:
         try:
-            await asyncio.wait_for(self._hangup.wait(), timeout=max_seconds)
-        except TimeoutError:
-            self._hangup_reason = "max_duration"
-            self._hangup.set()
+            self._last_activity = asyncio.get_running_loop().time()
+        except RuntimeError:
+            self._last_activity = time.monotonic()
+
+    async def _watch_hangup_or_timeout(self, max_seconds: int) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_seconds
+        idle_seconds = float(self.manager.settings.call_idle_timeout_seconds)
+        self._last_activity = loop.time()
+        while not self._hangup.is_set():
+            now = loop.time()
+            remaining_max = deadline - now
+            if remaining_max <= 0:
+                self._hangup_reason = "max_duration"
+                self._hangup.set()
+                break
+            timeout = remaining_max
+            if idle_seconds > 0:
+                remaining_idle = idle_seconds - (now - self._last_activity)
+                if remaining_idle <= 0:
+                    self._hangup_reason = "idle_timeout"
+                    self._hangup.set()
+                    log.info(
+                        "call %s idle timeout after %.1fs with no voice activity",
+                        self.record.id,
+                        idle_seconds,
+                    )
+                    break
+                timeout = min(timeout, remaining_idle)
+            try:
+                await asyncio.wait_for(self._hangup.wait(), timeout=timeout)
+            except TimeoutError:
+                continue
         raise _CallFinished()
 
     async def _pump_rtp_to_voice(self) -> None:
@@ -287,6 +334,8 @@ class _LiveCall:
 
     async def _consume_voice_events(self) -> None:
         async for event in self.provider.events():
+            if voice_event_is_activity(event):
+                self._mark_activity()
             if event.type == "audio.out":
                 pcm = event.payload.get("pcm") or b""
                 if pcm:
