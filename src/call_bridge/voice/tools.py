@@ -9,7 +9,8 @@ HANGUP_TOOL = ToolSpec(
         "(e.g. in French: « Je te laisse, au revoir ! » / « Je raccroche, au revoir ! »). "
         "Do not ask for permission to hang up unless the SCRIPT says so — but always say "
         "you are hanging up / say goodbye first, then call this tool. Also use after a "
-        "voicemail message or when the callee asks to stop. The bridge sends SIP BYE."
+        "voicemail message or when the callee asks to stop. The bridge sends SIP BYE. "
+        "Do not call ask_orchestrator when the conversation is already over."
     ),
     parameters={
         "type": "object",
@@ -31,7 +32,8 @@ ASK_ORCHESTRATOR_TOOL = ToolSpec(
     name="ask_orchestrator",
     description=(
         "Ask the Call/orchestrator a clarifying question when you need a fact you do not have. "
-        "The callee stays on the line. Keep the question short."
+        "The callee stays on the line. Keep the question short. Do not use this after a "
+        "spoken goodbye or when you intend to hang up."
     ),
     parameters={
         "type": "object",

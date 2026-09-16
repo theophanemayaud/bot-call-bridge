@@ -29,6 +29,8 @@ def test_script_instructions_require_short_voicemail_then_hangup():
     assert "who you are" in text
     assert "hang up" in text
     assert "Do not sit in silence after the greeting." in text
+    assert "instead of asking what to do next" in text
+    assert "If you say you will hang up, you must hang up." in text
 
 
 def test_requires_disclosure_and_goals():

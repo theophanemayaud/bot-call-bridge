@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -26,20 +27,103 @@ _APPEND_CHAR_LIMIT = 1800
 _CONNECT_TIMEOUT_SECONDS = 15.0
 _CLOSE_TIMEOUT_SECONDS = 2.0
 
+# How long to wait for output transcript when Live delegates before the goodbye
+# text has arrived. Does not delay RTP; only classification of that delegation.
+DELEGATION_TRANSCRIPT_GRACE_SECONDS = 0.45
+# After an explicit "I'll hang up" (and no new user speech), emit hangup even if
+# the model never delegated. Soft closers ("bye", "take care") do not arm this.
+HANGUP_FALLBACK_SETTLE_SECONDS = 1.8
+
+# Closers used when Live already delegated. Keep these at the *end* of a turn.
 _HANGUP_MARKERS = (
     "au revoir",
     "raccroche",
+    "je raccroche",
+    "je vais raccrocher",
     "je te laisse",
     "je vous laisse",
+    "à bientôt",
+    "a bientot",
     "goodbye",
     "good bye",
+    "bye-bye",
+    "bye bye",
+    "bye",
+    "take care",
+    "talk soon",
+    "have a good one",
+    "have a nice day",
+    "have a good day",
     "hanging up",
     "hang up",
     "i'll hang up",
     "i will hang up",
-    "voicemail",
-    "répondeur",
-    "repondeur",
+    "i'm hanging up",
+    "i am hanging up",
+    "i'll let you go",
+    "i will let you go",
+    "ha det bra",
+    "ha det",
+    "adjø",
+    "adjo",
+    "farvel",
+    "vi snakkes",
+    "jeg legger på",
+    "legger på",
+    "takk for nå",
+    "takk for na",
+    "ciao",
+)
+
+# Spoken intent strong enough to BYE without a second delegation.
+_EXPLICIT_HANGUP_MARKERS = (
+    "hanging up",
+    "hang up",
+    "i'll hang up",
+    "i will hang up",
+    "i'm hanging up",
+    "i am hanging up",
+    "i'm going to hang up",
+    "i am going to hang up",
+    "i'll let you go",
+    "i will let you go",
+    "je raccroche",
+    "je vais raccrocher",
+    "jeg legger på",
+    "legger på",
+)
+
+_HANGUP_NEGATIONS = (
+    "don't hang up",
+    "do not hang up",
+    "dont hang up",
+    "not hanging up",
+    "don't go",
+    "do not go",
+    "stay on the line",
+    "hold the line",
+    "hold on",
+    "one more thing",
+)
+
+_END_ONLY_HANGUP_MARKERS = (
+    "je te laisse",
+    "je vous laisse",
+    "ha det",
+)
+
+_CONTINUATION_PHRASES = (
+    "let me check",
+    "i'll check",
+    "i will check",
+    "i'll look",
+    "i will look",
+    "let me look",
+    "come back to you",
+    "i'll wait",
+    "i will wait",
+    "i forgot",
+    "before you go",
 )
 
 _LIVE_INSTRUCTION_PREFIX = """You are a calm, friendly voice agent on a live outbound phone call.
@@ -54,18 +138,24 @@ Silence and noise policy: Keep listening while the callee pauses to think. Do no
 
 Delegation policy:
 Backend tools:
-- ask_orchestrator: facts, decisions, and next steps the Call/orchestrator must provide. You do not have those facts.
+- ask_orchestrator: facts, decisions, and next steps the Call/orchestrator must provide. You do not have those facts. Never use this when the conversation is already finished or you are about to hang up.
 - hangup: end the phone call after you have already spoken an audible goodbye.
+
+When the goals are done, the callee says goodbye, or a fallback says to disconnect:
+1. Speak a short goodbye (for example "Thanks, take care, bye" / "Je te laisse, au revoir" / "Takk, ha det bra").
+2. Then immediately delegate hangup in the same turn. Do not ask the orchestrator what to do next. Do not wait for another user turn after you have said goodbye.
+3. If you say you will hang up, you must delegate hangup — saying "I'll hang up now" without delegating leaves the callee on the line.
 
 Voicemail: If you reach voicemail or an answering machine, leave a short message (who you are and why), say goodbye, then delegate hangup. Do not sit in silence after the greeting.
 
 Delegate to the backend when:
 - You need a fact, confirmation, or next step you do not have.
-- The conversation is complete, the callee asks to stop, or you just left a voicemail — speak goodbye first, then delegate so the line can hang up.
+- The conversation is complete, the callee asks to stop, or you just left a voicemail — speak goodbye first, then delegate hangup so the line can BYE.
 
 Do not delegate to the backend when:
 - You can answer from the SCRIPT, disclosure, or a still-current orchestrator result.
 - You only need a brief clarification from the callee.
+- The call is over except to hang up (use hangup, not ask_orchestrator).
 
 Delegate before giving an answer that depends on backend work.
 Do not invent facts while waiting.
@@ -113,17 +203,87 @@ def build_live_session_payload(
     }
 
 
-def classify_live_delegation(*, last_assistant: str, recent: str) -> tuple[str, dict[str, Any]]:
+def _normalize_speech(text: str) -> str:
+    lowered = (text or "").strip().lower()
+    for src in ("\u2019", "\u2018", "\u02bc", "`"):
+        lowered = lowered.replace(src, "'")
+    return " ".join(lowered.split())
+
+
+def _closing_tail(text: str, *, max_chars: int = 180) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _phrase_in(text: str, phrase: str) -> bool:
+    pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
+    return re.search(pattern, text) is not None
+
+
+def _phrase_at_close(text: str, phrase: str) -> bool:
+    """True when ``phrase`` is a closer, not 'je te laisse vérifier'."""
+    match = None
+    for found in re.finditer(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text):
+        match = found
+    if not match:
+        return False
+    rest = text[match.end() :].strip(" .,!?;:…-")
+    if not rest:
+        return True
+    return any(_phrase_in(rest, marker) for marker in _HANGUP_MARKERS if marker != phrase)
+
+
+def looks_like_hangup_speech(text: str, *, explicit: bool = False) -> bool:
+    """True when the closing tail of an utterance is a hangup/goodbye.
+
+    ``explicit=True`` requires "I'll hang up" / "je raccroche" / similar — used
+    for the no-delegation fallback. Soft closers (bye, take care) only count
+    when Live already delegated, so mid-call "take care of the booking" does not
+    BYE.
+    """
+    tail = _closing_tail(_normalize_speech(text))
+    if not tail:
+        return False
+    if any(_phrase_in(tail, phrase) for phrase in _CONTINUATION_PHRASES):
+        return False
+    if any(_phrase_in(tail, phrase) for phrase in _HANGUP_NEGATIONS):
+        return False
+    markers = _EXPLICIT_HANGUP_MARKERS if explicit else _HANGUP_MARKERS
+    for marker in markers:
+        if marker == "take care" and _phrase_in(tail, "take care of"):
+            continue
+        if marker in _END_ONLY_HANGUP_MARKERS and not _phrase_at_close(tail, marker):
+            continue
+        if _phrase_in(tail, marker):
+            return True
+    return False
+
+
+def classify_live_delegation(
+    *,
+    last_assistant: str,
+    recent: str,
+    last_user: str = "",
+) -> tuple[str, dict[str, Any]]:
     """Map a client-delegation notice onto hangup or ask_orchestrator.
 
     Live `session.delegation.created` has metadata only — no tool name or args.
-    The last assistant utterance is the best hangup signal after a spoken goodbye.
+    Prefer the current assistant closer (trailing after the last user turn). If
+    that text is empty, a callee closer like "bye" still maps to hangup.
     """
-    text = (last_assistant or "").strip().lower()
-    if text and any(marker in text for marker in _HANGUP_MARKERS):
+    assistant = (last_assistant or "").strip()
+    if looks_like_hangup_speech(assistant):
         return "hangup", {
             "reason": "agent",
-            "summary": (last_assistant or recent)[-240:],
+            "summary": assistant[-240:],
+        }
+    user = (last_user or "").strip()
+    if not assistant and looks_like_hangup_speech(user):
+        return "hangup", {
+            "reason": "agent",
+            "summary": user[-240:] or (recent or "")[-240:],
         }
     return "ask_orchestrator", {
         "question": "The live model delegated. What should I do or say next?",
@@ -170,6 +330,10 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._fragments: list[tuple[str, str]] = []
         self._user_speaking = False
         self._closing = False
+        self._hangup_emitted = False
+        self._fallback_task: asyncio.Task[None] | None = None
+        self._classify_tasks: set[asyncio.Task[None]] = set()
+        self._last_assistant_activity_at = 0.0
 
     @property
     def name(self) -> str:
@@ -184,6 +348,10 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._delegations.clear()
         self._fragments.clear()
         self._user_speaking = False
+        self._hangup_emitted = False
+        self._last_assistant_activity_at = 0.0
+        self._cancel_classify_tasks()
+        self._disarm_hangup_fallback()
         url = self._settings.openai_live_url
         log.info("connecting openai gpt-live %s", self._settings.openai_live_model)
         self._ws = await websockets.connect(
@@ -220,6 +388,8 @@ class OpenAILiveProvider(VoiceAgentProvider):
 
     async def close(self) -> None:
         self._closing = True
+        self._disarm_hangup_fallback()
+        self._cancel_classify_tasks()
         if self._ws is not None and self._live_started() and not self._server_closed.is_set():
             try:
                 await self._send({"type": "session.close", "event_id": _event_id("close")})
@@ -375,26 +545,137 @@ class OpenAILiveProvider(VoiceAgentProvider):
             return blob[-max_chars:]
         return blob
 
-    def _last_role_text(self, role: str) -> str:
+    def _trailing_role_text(self, role: str) -> str:
+        """Text for ``role`` only if that role is currently speaking (no later other-role turn)."""
         chunks: list[str] = []
         for frag_role, text in reversed(self._fragments):
-            if frag_role != role:
-                if chunks:
-                    break
+            if not (text or "").strip():
                 continue
+            if frag_role != role:
+                break
             chunks.append(text)
         chunks.reverse()
         return "".join(chunks)
 
+    def _mark_assistant_activity(self) -> None:
+        try:
+            self._last_assistant_activity_at = asyncio.get_running_loop().time()
+        except RuntimeError:
+            self._last_assistant_activity_at = 0.0
+
+    def _cancel_classify_tasks(self) -> None:
+        for task in list(self._classify_tasks):
+            task.cancel()
+        self._classify_tasks.clear()
+
+    def _disarm_hangup_fallback(self) -> None:
+        task = self._fallback_task
+        self._fallback_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _arm_hangup_fallback(self) -> None:
+        if self._hangup_emitted or self._closing:
+            return
+        self._disarm_hangup_fallback()
+        try:
+            self._fallback_task = asyncio.get_running_loop().create_task(
+                self._hangup_fallback_watch(),
+                name="openai-hangup-fallback",
+            )
+        except RuntimeError:
+            self._fallback_task = None
+
+    def _track_task(self, task: asyncio.Task[None]) -> None:
+        self._classify_tasks.add(task)
+        task.add_done_callback(self._classify_tasks.discard)
+
+    def _on_assistant_speech(self, text: str) -> None:
+        self._mark_assistant_activity()
+        if not text:
+            return
+        trailing = self._trailing_role_text("assistant")
+        if looks_like_hangup_speech(trailing, explicit=True):
+            self._arm_hangup_fallback()
+        elif not looks_like_hangup_speech(trailing):
+            self._disarm_hangup_fallback()
+
     async def _note_transcript(self, role: str, text: str) -> None:
         if text:
             self._fragments.append((role, text))
+        if role == "assistant":
+            self._on_assistant_speech(text)
+        else:
+            self._disarm_hangup_fallback()
         await self._events.put(
             VoiceEvent(
                 type="transcript",
                 payload={"role": role, "text": text, "final": False},
             )
         )
+
+    async def _emit_tool_call(self, tool: str, tool_call_id: str, arguments: dict[str, Any]) -> None:
+        self._delegations[tool_call_id] = tool
+        if tool == "hangup":
+            self._hangup_emitted = True
+            self._disarm_hangup_fallback()
+        log.info("openai live tool %s id=%s", tool, tool_call_id)
+        await self._events.put(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": tool,
+                    "tool_call_id": tool_call_id,
+                    "arguments": arguments,
+                },
+            )
+        )
+
+    async def _classify_and_emit_delegation(self, delegation_id: str, *, wait_for_transcript: bool) -> None:
+        if wait_for_transcript:
+            deadline = asyncio.get_running_loop().time() + DELEGATION_TRANSCRIPT_GRACE_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                if self._trailing_role_text("assistant") or self._trailing_role_text("user"):
+                    break
+                await asyncio.sleep(0.05)
+        if self._hangup_emitted or self._closing:
+            return
+        assistant = self._trailing_role_text("assistant")
+        user = self._trailing_role_text("user")
+        tool, arguments = classify_live_delegation(
+            last_assistant=assistant,
+            last_user=user,
+            recent=self._recent_conversation(),
+        )
+        await self._emit_tool_call(tool, delegation_id, arguments)
+
+    async def _hangup_fallback_watch(self) -> None:
+        """BYE after explicit hangup speech when Live never delegates.
+
+        Armed only on "I'll hang up" / "je raccroche" / similar — not on "bye"
+        or "take care", which are common mid-call. Cancelled on user barge-in.
+        """
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+                if self._hangup_emitted or self._closing or self._user_speaking:
+                    return
+                last = self._trailing_role_text("assistant")
+                if not looks_like_hangup_speech(last, explicit=True):
+                    return
+                idle = asyncio.get_running_loop().time() - self._last_assistant_activity_at
+                if idle >= HANGUP_FALLBACK_SETTLE_SECONDS:
+                    await self._emit_tool_call(
+                        "hangup",
+                        f"hangup_fallback_{uuid.uuid4().hex[:12]}",
+                        {
+                            "reason": "spoken_goodbye",
+                            "summary": last[-240:],
+                        },
+                    )
+                    return
+        except asyncio.CancelledError:
+            return
 
     async def _handle_server_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type", "")
@@ -413,6 +694,7 @@ class OpenAILiveProvider(VoiceAgentProvider):
             delta = event.get("delta") or event.get("audio")
             if delta:
                 self._user_speaking = False
+                self._mark_assistant_activity()
                 await self._events.put(
                     VoiceEvent(type="audio.out", payload={"pcm": base64.b64decode(delta)})
                 )
@@ -436,21 +718,20 @@ class OpenAILiveProvider(VoiceAgentProvider):
             if not delegation_id:
                 log.warning("openai live delegation missing id: %s", event)
                 return
-            tool, arguments = classify_live_delegation(
-                last_assistant=self._last_role_text("assistant"),
-                recent=self._recent_conversation(),
-            )
-            self._delegations[delegation_id] = tool
-            await self._events.put(
-                VoiceEvent(
-                    type="tool_call",
-                    payload={
-                        "tool": tool,
-                        "tool_call_id": delegation_id,
-                        "arguments": arguments,
-                    },
+            assistant = self._trailing_role_text("assistant")
+            user = self._trailing_role_text("user")
+            # If goodbye audio/transcript is still in flight, wait off the read
+            # loop so later output_transcript.delta events can arrive.
+            wait = not assistant and not user
+            if wait:
+                self._track_task(
+                    asyncio.create_task(
+                        self._classify_and_emit_delegation(delegation_id, wait_for_transcript=True),
+                        name="openai-classify-delegation",
+                    )
                 )
-            )
+                return
+            await self._classify_and_emit_delegation(delegation_id, wait_for_transcript=False)
             return
         if kind == "error":
             message = _error_message(event)
