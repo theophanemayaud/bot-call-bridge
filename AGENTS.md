@@ -85,7 +85,7 @@ Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback a
 
 ### `hangup`
 
-The model calls `hangup` (Grok / function tools) or Live client-delegates after a spoken goodbye. The bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
+The model calls `hangup` (Grok / function tools) or Live client-delegates after a spoken goodbye. The bridge classifies Live `session.delegation.created` from the current closer (bye / take care / au revoir / I'll hang up). If the model says it will hang up and never delegates, a short idle settle still BYEs (`hangup_reason=spoken_goodbye`). The bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
 
 **Voicemail:** SCRIPT + Live instructions tell the agent to leave a short message (who + why), say goodbye, then hang up. Do not sit in silence after a greeting.
 

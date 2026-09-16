@@ -10,7 +10,7 @@ This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/
 |---|---|
 | Codec | Native **PCMA** 8 kHz both ways (no local resample). Live **requires** `audio.format.rate` on `audio/pcma` |
 | Turn taking | Model + prompt (Backchannel / Interruption / Silence policies). No Realtime VAD knobs |
-| Tools | Client delegation (`delegation.type=client`) → `session.delegation.created` → `ask_orchestrator` / `hangup` |
+| Tools | Client delegation (`delegation.type=client`) → `session.delegation.created` → classified as `ask_orchestrator` or `hangup` from the current closer (bye / take care / au revoir / ha det bra / I'll hang up). Explicit "I'll hang up" with no follow-up delegation still BYEs after a short settle. |
 | Voicemail | Live instructions: short message (who + why), goodbye, then delegate hangup. Do not sit silent after the greeting |
 | Idle hangup | Bridge-wide `CALL_IDLE_TIMEOUT_SECONDS` (default 30) — not Live-specific. See `AGENTS.md` |
 | Steers | `session.instructions.append` (steer) / verbatim disclosure via instructions.append |
@@ -20,6 +20,16 @@ This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/
 **PCMA pitfall:** Live **requires** `{"type":"audio/pcma","rate":8000}`. Omitting `rate` (the old Realtime GA trick) is wrong here. SIP still forwards 8 kHz a-law as-is.
 
 Live does **not** emit `response.audio.done` / `response.done` for spoken turns. Downlink playout is whatever `session.output_audio.delta` chunks have been queued. Barge-in flushes that queue when the first `session.input_transcript.delta` arrives.
+
+## Hangup (client delegation)
+
+Live `session.delegation.created` has metadata only — no tool name. The bridge maps that notice to `hangup` vs `ask_orchestrator` from the **current** closer (assistant text after the last user turn):
+
+- Soft closers (`bye`, `take care`, `au revoir`, `ha det bra`, …) count as hangup **only when Live already delegated**. They do not auto-BYE on their own (mid-call "I'll take care of the booking" must not hang up).
+- Explicit intent (`I'll hang up`, `je raccroche`, `jeg legger på`) still BYEs if the model says it will hang up and then never delegates. The fallback waits until assistant audio/transcript has been idle for ~1.8s and cancels on user barge-in. It does **not** add steady-state playout delay.
+- `ask_orchestrator` no longer blocks a later `hangup`: the session consumes hangup while an orchestrator answer is still pending, then SIP BYE.
+
+SCRIPT + Live instructions tell the model: after goodbye, delegate hangup in the same turn — do not ask the orchestrator "what next" when the call is over.
 
 ## Defaults in `.env.example`
 
