@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from unittest.mock import MagicMock
 
@@ -15,6 +16,7 @@ from call_bridge.voice.openai import (
     classify_live_delegation,
     compose_live_instructions,
     live_audio_format,
+    looks_like_hangup_speech,
 )
 from call_bridge.voice.provider import AudioFormat, VoiceAgentProvider, VoiceSessionConfig
 from call_bridge.voice.tools import default_call_tools, tools_as_openai_functions
@@ -109,6 +111,8 @@ def test_compose_live_instructions_keeps_policy_labels():
     assert "short message" in text
     assert "delegate hangup" in text
     assert "Do not sit in silence after the greeting." in text
+    assert "Never use this when the conversation is already finished" in text
+    assert "immediately delegate hangup" in text
 
 
 def test_classify_live_delegation_hangup_from_goodbye():
@@ -120,6 +124,32 @@ def test_classify_live_delegation_hangup_from_goodbye():
     assert args["reason"] == "agent"
 
 
+def test_classify_live_delegation_victoria_take_care_bye():
+    """Production 2026-09-16: thanks / Take care / bye was misclassified as ask_orchestrator."""
+    tool, args = classify_live_delegation(
+        last_assistant="Thanks. Take care. Bye.",
+        recent="user: that's all I needed\nassistant: Thanks. Take care. Bye.",
+    )
+    assert tool == "hangup"
+    assert "Take care" in args["summary"]
+
+
+def test_classify_live_delegation_ill_hang_up_now():
+    tool, args = classify_live_delegation(
+        last_assistant="Bye, I'll hang up now.",
+        recent="assistant: Bye, I'll hang up now.",
+    )
+    assert tool == "hangup"
+
+
+def test_classify_live_delegation_norwegian_closer():
+    tool, _args = classify_live_delegation(
+        last_assistant="Takk for nå, ha det bra!",
+        recent="user: ha det\nassistant: Takk for nå, ha det bra!",
+    )
+    assert tool == "hangup"
+
+
 def test_classify_live_delegation_defaults_to_orchestrator():
     tool, args = classify_live_delegation(
         last_assistant="Je vérifie ça tout de suite.",
@@ -127,6 +157,57 @@ def test_classify_live_delegation_defaults_to_orchestrator():
     )
     assert tool == "ask_orchestrator"
     assert "Tuesday or Thursday?" in args["context"]
+
+
+def test_classify_live_delegation_take_care_of_is_not_hangup():
+    tool, _args = classify_live_delegation(
+        last_assistant="I'll take care of the booking.",
+        recent="user: can you handle that?",
+    )
+    assert tool == "ask_orchestrator"
+
+
+def test_classify_live_delegation_je_te_laisse_verifier_is_not_hangup():
+    tool, _args = classify_live_delegation(
+        last_assistant="Je te laisse vérifier ça.",
+        recent="user: mardi ou jeudi ?",
+    )
+    assert tool == "ask_orchestrator"
+
+
+def test_classify_live_delegation_user_bye_when_assistant_empty():
+    tool, args = classify_live_delegation(
+        last_assistant="",
+        last_user="Ok, goodbye.",
+        recent="assistant: that's confirmed\nuser: Ok, goodbye.",
+    )
+    assert tool == "hangup"
+    assert args["reason"] == "agent"
+
+
+def test_classify_live_delegation_user_question_is_not_hangup():
+    tool, _args = classify_live_delegation(
+        last_assistant="",
+        last_user="Wait, what about Thursday?",
+        recent="assistant: Take care, bye.\nuser: Wait, what about Thursday?",
+    )
+    assert tool == "ask_orchestrator"
+
+
+@pytest.mark.parametrize(
+    "text,explicit,expected",
+    [
+        ("Thanks. Take care. Bye.", False, True),
+        ("Thanks. Take care. Bye.", True, False),
+        ("Bye, I'll hang up now.", True, True),
+        ("Je raccroche, au revoir.", True, True),
+        ("I'll take care of the booking.", False, False),
+        ("Don't hang up, I'll check.", True, False),
+        ("Let me check Tuesday for you.", False, False),
+    ],
+)
+def test_looks_like_hangup_speech_markers(text, explicit, expected):
+    assert looks_like_hangup_speech(text, explicit=explicit) is expected
 
 
 @pytest.mark.asyncio
@@ -179,6 +260,108 @@ async def test_openai_maps_live_server_events():
     assert seen[3].payload["tool_call_id"] == "item_orch_1"
     assert seen[5].payload["tool"] == "hangup"
     assert seen[5].payload["tool_call_id"] == "item_hang_1"
+
+
+@pytest.mark.asyncio
+async def test_openai_maps_victoria_goodbye_delegation_to_hangup():
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    await provider._handle_server_event(
+        {"type": "session.output_transcript.delta", "delta": "Thanks. Take care. Bye."}
+    )
+    await provider._handle_server_event(
+        {
+            "type": "session.delegation.created",
+            "delegation": {"id": "item_hang_v", "type": "delegation", "target": "client"},
+        }
+    )
+    seen: list = []
+    while not provider._events.empty():
+        seen.append(await provider._events.get())
+    tools = [event for event in seen if event.type == "tool_call"]
+    assert len(tools) == 1
+    assert tools[0].payload["tool"] == "hangup"
+    assert tools[0].payload["tool_call_id"] == "item_hang_v"
+
+
+@pytest.mark.asyncio
+async def test_openai_delegation_waits_for_late_goodbye_transcript(monkeypatch):
+    monkeypatch.setattr("call_bridge.voice.openai.DELEGATION_TRANSCRIPT_GRACE_SECONDS", 0.35)
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    await provider._handle_server_event(
+        {
+            "type": "session.delegation.created",
+            "delegation": {"id": "item_late", "type": "delegation", "target": "client"},
+        }
+    )
+    assert provider._events.empty()
+    await provider._handle_server_event(
+        {"type": "session.output_transcript.delta", "delta": "Take care, bye."}
+    )
+    deadline = asyncio.get_running_loop().time() + 1.0
+    tool_event = None
+    while asyncio.get_running_loop().time() < deadline:
+        if not provider._events.empty():
+            event = await provider._events.get()
+            if event.type == "tool_call":
+                tool_event = event
+                break
+        await asyncio.sleep(0.02)
+    assert tool_event is not None
+    assert tool_event.payload["tool"] == "hangup"
+    assert tool_event.payload["tool_call_id"] == "item_late"
+
+
+@pytest.mark.asyncio
+async def test_openai_hangup_fallback_after_spoken_intent_without_delegation(monkeypatch):
+    monkeypatch.setattr("call_bridge.voice.openai.HANGUP_FALLBACK_SETTLE_SECONDS", 0.08)
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    await provider._handle_server_event(
+        {"type": "session.output_transcript.delta", "delta": "Bye, I'll hang up now."}
+    )
+    deadline = asyncio.get_running_loop().time() + 1.0
+    tool_event = None
+    while asyncio.get_running_loop().time() < deadline:
+        if not provider._events.empty():
+            event = await provider._events.get()
+            if event.type == "tool_call":
+                tool_event = event
+                break
+        await asyncio.sleep(0.02)
+    assert tool_event is not None
+    assert tool_event.payload["tool"] == "hangup"
+    assert tool_event.payload["arguments"]["reason"] == "spoken_goodbye"
+    assert tool_event.payload["tool_call_id"].startswith("hangup_fallback_")
+
+
+@pytest.mark.asyncio
+async def test_openai_hangup_fallback_not_armed_on_soft_closer(monkeypatch):
+    monkeypatch.setattr("call_bridge.voice.openai.HANGUP_FALLBACK_SETTLE_SECONDS", 0.08)
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    await provider._handle_server_event(
+        {"type": "session.output_transcript.delta", "delta": "Thanks. Take care. Bye."}
+    )
+    await asyncio.sleep(0.2)
+    seen: list = []
+    while not provider._events.empty():
+        seen.append(await provider._events.get())
+    assert all(event.type != "tool_call" for event in seen)
+
+
+@pytest.mark.asyncio
+async def test_openai_hangup_fallback_cancelled_on_user_speech(monkeypatch):
+    monkeypatch.setattr("call_bridge.voice.openai.HANGUP_FALLBACK_SETTLE_SECONDS", 0.2)
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    await provider._handle_server_event(
+        {"type": "session.output_transcript.delta", "delta": "I'll hang up now."}
+    )
+    await provider._handle_server_event(
+        {"type": "session.input_transcript.delta", "delta": "wait, one more thing"}
+    )
+    await asyncio.sleep(0.35)
+    seen: list = []
+    while not provider._events.empty():
+        seen.append(await provider._events.get())
+    assert all(event.type != "tool_call" for event in seen)
 
 
 @pytest.mark.asyncio

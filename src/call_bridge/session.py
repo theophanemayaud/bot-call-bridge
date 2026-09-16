@@ -191,6 +191,7 @@ class _LiveCall:
         self._downlink: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
         self._play_buf = bytearray()
         self._last_activity = time.monotonic()
+        self._orchestrator_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         record = self.record
@@ -354,7 +355,7 @@ class _LiveCall:
             elif event.type == "transcript":
                 self.manager._emit(self.record, "transcript", event.payload)
             elif event.type == "tool_call":
-                await self._on_tool_call(event.payload)
+                await self._dispatch_tool_call(event.payload)
             elif event.type == "error":
                 self.manager._emit(self.record, "voice.error", event.payload)
             elif event.type == "closed":
@@ -368,6 +369,27 @@ class _LiveCall:
             except asyncio.QueueEmpty:
                 return
 
+    def _cancel_pending_orchestrator(self) -> None:
+        for pending in list(self.record.pending_tools.values()):
+            if not pending.future.done():
+                pending.future.cancel()
+        for task in list(self._orchestrator_tasks):
+            task.cancel()
+
+    async def _dispatch_tool_call(self, payload: dict[str, Any]) -> None:
+        """Hangup must not wait behind ask_orchestrator (Live can emit both)."""
+        tool = payload.get("tool")
+        if tool == "hangup":
+            self._cancel_pending_orchestrator()
+            await self._on_tool_call(payload)
+            return
+        if tool == "ask_orchestrator":
+            task = asyncio.create_task(self._on_tool_call(payload), name="ask-orchestrator")
+            self._orchestrator_tasks.add(task)
+            task.add_done_callback(self._orchestrator_tasks.discard)
+            return
+        await self._on_tool_call(payload)
+
     async def _on_tool_call(self, payload: dict[str, Any]) -> None:
         tool = payload.get("tool")
         tool_call_id = payload.get("tool_call_id") or uuid.uuid4().hex
@@ -378,6 +400,8 @@ class _LiveCall:
             {"tool": tool, "tool_call_id": tool_call_id, "arguments": arguments},
         )
         if tool == "hangup":
+            if self._hangup.is_set():
+                return
             await self.provider.submit_tool_result(
                 tool_call_id,
                 {"ok": True, "hanging_up": True},
@@ -413,7 +437,12 @@ class _LiveCall:
                     "error": "orchestrator_timeout",
                     "instruction": "The orchestrator did not answer in time. Use a fallback and do not invent facts.",
                 }
+            except asyncio.CancelledError:
+                self.record.pending_tools.pop(tool_call_id, None)
+                return
             self.record.pending_tools.pop(tool_call_id, None)
+            if self._hangup.is_set():
+                return
             if self.record.state == "waiting_orchestrator":
                 self.record.state = "bridged"
             await self.provider.submit_tool_result(tool_call_id, result, continue_response=True)
@@ -426,6 +455,7 @@ class _LiveCall:
 
     async def _teardown(self) -> None:
         reason = self._hangup_reason
+        self._cancel_pending_orchestrator()
         try:
             await self.manager.sip.hangup(self.record.id, reason=reason)
         except Exception as exc:
