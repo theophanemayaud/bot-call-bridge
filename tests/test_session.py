@@ -178,3 +178,58 @@ async def test_idle_timeout_disabled_when_zero():
     finally:
         if record.state not in {"ended", "failed"}:
             await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_hangup_tool_call_ends_sip_call():
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "hangup",
+                    "tool_call_id": "h1",
+                    "arguments": {"reason": "agent", "summary": "Take care, bye"},
+                },
+            )
+        )
+        await _wait_record(record, states={"ended", "failed"}, timeout=6.0)
+        assert record.state == "ended"
+        assert record.hangup_reason == "agent"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_hangup_not_blocked_by_pending_orchestrator():
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch_1",
+                    "arguments": {"question": "What next?"},
+                },
+            )
+        )
+        await _wait_record(record, states={"waiting_orchestrator"}, timeout=2.0)
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "hangup",
+                    "tool_call_id": "h2",
+                    "arguments": {"reason": "agent", "summary": "Bye, I'll hang up now."},
+                },
+            )
+        )
+        await _wait_record(record, states={"ended", "failed"}, timeout=6.0)
+        assert record.state == "ended"
+        assert record.hangup_reason == "agent"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
