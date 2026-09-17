@@ -24,4 +24,4 @@ Writes a staging directory (default `dist/call-bot-package/`) containing:
 
 **Do not** copy `.env`, passwords, or live numbers. If an export tool asks for API keys, the operator pastes them at share time — this script will not.
 
-After packaging, attach the skills and profile in the Grok Bot builder. Point the bot at a **private** bridge URL; the package is instructions, not the SIP stack.
+After packaging, attach the skills and profile in the Grok Bot builder. Recipients must clone https://github.com/theophanemayaud/bot-call-bridge to install the bridge. Point the bot at a **private** bridge URL; the package is instructions, not the SIP stack.

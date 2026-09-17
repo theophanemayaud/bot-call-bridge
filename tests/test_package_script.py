@@ -24,4 +24,8 @@ def test_package_call_bot_writes_staging(tmp_path: Path):
     assert dest.joinpath("memories/providers.md").is_file()
     assert dest.joinpath("docs/providers/ovh.md").is_file()
     assert "XAI_API_KEY=" not in dest.joinpath("PROFILE.md").read_text()
+    repo = "https://github.com/theophanemayaud/bot-call-bridge"
+    assert repo in dest.joinpath("skills/setup/SKILL.md").read_text()
+    assert repo in dest.joinpath("PROFILE.md").read_text()
+    assert repo in dest.joinpath("MANIFEST.md").read_text()
     assert "Wrote" in proc.stdout
