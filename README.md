@@ -32,6 +32,10 @@ flowchart LR
 | `examples/` | Anonymized SCRIPT samples (`script.sample.json`, `demo-fr.json`, `sample-outbound.json`) |
 | `scripts/package-call-bot.sh` | Assemble a shareable staging folder |
 
+## Using with a shared Call bot
+
+A shared Grok Bot **Call** template only ships profile, skills, and memories. Clone this repo (`git clone https://github.com/theophanemayaud/bot-call-bridge.git`), install the bridge, and point Call at **your** private control plane. The bot is the orchestrator; this process is the SIP stack. Do not put SIP passwords or API keys in the bot share.
+
 ## Quickstart (mock)
 
 No SIP creds or xAI key required.

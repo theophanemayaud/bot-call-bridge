@@ -31,7 +31,7 @@ cp "$ROOT/bot/memories/"*.md "$DEST/memories/"
   echo
   sed -n '1,40p' "$ROOT/README.md"
   echo
-  echo "Full README is in the call-bridge repo."
+  echo "Full README: https://github.com/theophanemayaud/bot-call-bridge"
 } > "$DEST/docs/README.excerpt.md"
 
 cp "$ROOT/docs/providers/README.md" "$DEST/docs/providers/README.md"
@@ -43,7 +43,13 @@ cat > "$DEST/MANIFEST.md" <<'EOF'
 # Call bot package
 
 Staging folder produced by `scripts/package-call-bot.sh`.
-Contains **instructions only** — no SIP passwords, no `XAI_API_KEY`, no live numbers.
+This package is **instructions only** — no SIP passwords, no `XAI_API_KEY`, no live numbers, and no bridge runtime.
+
+Recipients must clone the public repo to install the SIP/voice stack:
+
+    git clone https://github.com/theophanemayaud/bot-call-bridge.git
+
+Then follow `skills/setup/SKILL.md` (venv, `pip install`, `.env`) on the operator machine.
 
 ## Map to a Grok Bot share
 

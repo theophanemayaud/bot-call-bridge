@@ -1,4 +1,6 @@
-Call-bridge control plane (default `http://127.0.0.1:43123`):
+Call-bridge control plane (default `http://127.0.0.1:43123`). Install the process from https://github.com/theophanemayaud/bot-call-bridge. Secrets (`SIP_*`, voice API keys) stay on the operator machine — this memory is the HTTP/WS contract only.
+
+Endpoints:
 
 - `POST /v1/calls` with `{ "script": {…} }`
 - `WS /v1/calls/{id}/events` for transcript + `ask_orchestrator`
