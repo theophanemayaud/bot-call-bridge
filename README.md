@@ -29,6 +29,7 @@ flowchart LR
 | `docs/providers/` | How to add / operate a SIP carrier |
 | `skills/` | Call-bot skills (setup, troubleshoot, handle-a-call, package) |
 | `bot/` | Call persona + memory stubs for a later Grok Bot share |
+| `examples/` | Anonymized SCRIPT samples (`script.sample.json`, `demo-fr.json`, `sample-outbound.json`) |
 | `scripts/package-call-bot.sh` | Assemble a shareable staging folder |
 
 ## Quickstart (mock)
@@ -79,7 +80,7 @@ See `skills/setup/SKILL.md` for the operator checklist and `skills/troubleshoot/
 | Live events | `WS /v1/calls/{id}/events` |
 | Health | `GET /health` · `GET /v1/status` |
 
-Agent context (goals, ownership, what not to add) and Call-agent contract: [`AGENTS.md`](AGENTS.md). Sample SCRIPT: `examples/script.sample.json` (anonymized).
+Agent context (goals, ownership, what not to add) and Call-agent contract: [`AGENTS.md`](AGENTS.md). Sample SCRIPT: `examples/script.sample.json`. Other generic demos: `examples/demo-fr.json`, `examples/sample-outbound.json`.
 
 ## Voice providers
 
