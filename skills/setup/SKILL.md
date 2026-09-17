@@ -5,7 +5,14 @@ description: Install call-bridge, configure a SIP provider and Grok Voice, verif
 
 # Setup
 
-Bring a Linux box from zero to a registered SIP line + Grok Voice. Provider-specific values live in `docs/providers/` — do not invent hosts or logins.
+Clone this public repo, then bring a Linux box from zero to a registered SIP line + Grok Voice.
+
+```bash
+git clone https://github.com/theophanemayaud/bot-call-bridge.git
+cd bot-call-bridge
+```
+
+Provider-specific values live in `docs/providers/` — do not invent hosts or logins.
 
 ## 1. Install the bridge
 

@@ -1,3 +1,5 @@
+Install the bridge from https://github.com/theophanemayaud/bot-call-bridge. SIP passwords and voice API keys stay on the operator machine; they are not in this package.
+
 SIP is configured with `SIP_REGISTRAR`, `SIP_PROXY`, `SIP_DOMAIN`, `SIP_USERNAME`, `SIP_PASSWORD`. The bridge is not a carrier.
 
 Prefer OVH (softphone SIP line, no hardware lock) when the bridge runs on a cloud or Grok-bot box — see docs/providers/ovh.md. VoipWise often returns 500 from datacenter IPs; treat it as residential-only (docs/providers/voipwise.md).
