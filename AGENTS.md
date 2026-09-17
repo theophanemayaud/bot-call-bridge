@@ -10,7 +10,7 @@ The Grok Bot **Call** agent (or any orchestrator) owns the SCRIPT, answers `ask_
 
 ## Goals
 
-**Real-time (happy path).** A primary system goal is minimum end-to-end latency on the normal conversational path. Prefer solutions that do not permanently delay the media stream — no constant prebuffer / jitter delay as the default fix. When fixing duplex micro-cuts, prefer selective barge-in flush / policy changes over adding steady-state playout delay. *(Théophane, 2026-09-13)*
+**Real-time (happy path).** A primary system goal is minimum end-to-end latency on the normal conversational path. Prefer solutions that do not permanently delay the media stream — no constant prebuffer / jitter delay as the default fix. When fixing duplex micro-cuts, prefer selective barge-in flush / policy changes over adding steady-state playout delay.
 
 Also true and durable:
 

@@ -8,7 +8,19 @@ from pydantic import ValidationError
 
 from call_bridge.script import CallScript, normalize_dial_user
 
-SAMPLE = json.loads(Path("examples/script.sample.json").read_text())
+EXAMPLES_DIR = Path("examples")
+SAMPLE = json.loads((EXAMPLES_DIR / "script.sample.json").read_text())
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted(EXAMPLES_DIR.glob("*.json")),
+    ids=lambda path: path.name,
+)
+def test_example_scripts_validate(path: Path):
+    script = CallScript.model_validate_json(path.read_text())
+    assert script.call.to == "+33XXXXXXXXX"
+    assert script.metadata.get("ticket")
 
 
 def test_sample_script_validates():
@@ -44,5 +56,5 @@ def test_requires_disclosure_and_goals():
 
 def test_normalize_plus_to_00():
     assert normalize_dial_user("+33XXXXXXXXX") == "0033XXXXXXXXX"
-    assert normalize_dial_user("0033142867800") == "0033142867800"
-    assert normalize_dial_user("+33 1 42 86 78 00") == "0033142867800"
+    assert normalize_dial_user("0033123456789") == "0033123456789"
+    assert normalize_dial_user("+33 1 23 45 67 89") == "0033123456789"

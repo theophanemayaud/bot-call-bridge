@@ -1,0 +1,42 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr"
+  },
+  "mission": {
+    "disclosure": "Bonjour, je suis un assistant vocal automatique. C'est un test d'appel — je ne suis pas un humain.",
+    "goals": [
+      "Confirmer que le correspondant entend bien et que le test technique marche",
+      "Demander ce qui est prévu pour la visite de fin septembre",
+      "Noter date/heure d'arrivée prévue et de départ / retour",
+      "Noter tout autre détail utile (hébergement, repas, contraintes)",
+      "Remercier et raccrocher poliment"
+    ],
+    "constraints": [
+      "Parler en français, vouvoiement par défaut",
+      "Ne pas inventer de dates — si le correspondant ne sait pas, le noter",
+      "Ne pas parler de sujets sensibles hors visite fin septembre",
+      "Si messagerie / pas de réponse: laisser un court message rappelant qu'il s'agit d'un test d'assistant vocal, puis raccrocher",
+      "Si le correspondant refuse l'IA: s'excuser, proposer un rappel humain, raccrocher"
+    ],
+    "fallbacks": [
+      "occupé / pas de réponse → ne pas rappeler tout de suite",
+      "ask_orchestrator si une info critique manque (ex. quelle fin septembre exacte)"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": "Visit window: late September of the current year. Be warm and brief. Capture arrival/departure times and lodging/meal constraints if offered. If ask_orchestrator: keep the callee engaged; do not invent dates."
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": [
+      "septembre",
+      "visite"
+    ],
+    "max_duration_seconds": 300,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "call-agent",
+    "ticket": "demo-visit-now"
+  }
+}
