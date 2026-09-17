@@ -1,0 +1,38 @@
+{
+  "call": {
+    "to": "+33XXXXXXXXX",
+    "language": "fr"
+  },
+  "mission": {
+    "disclosure": "Bonjour, je suis un assistant vocal automatique. Cet appel est un test d'assistance par intelligence artificielle.",
+    "goals": [
+      "Confirmer que le correspondant t'entend bien",
+      "Demander si l'ancien kit a déjà été renvoyé après le remplacement",
+      "Demander si le nouveau kit fonctionne correctement",
+      "Remercier et raccrocher"
+    ],
+    "constraints": [
+      "Parler uniquement en français",
+      "Rester court (moins de 3 minutes)",
+      "Ne pas inventer de logistique, de suivi ou de numéro de suivi",
+      "Ne pas prétendre être un humain",
+      "Ne pas laisser un message vocal de plus de 15 secondes"
+    ],
+    "fallbacks": [
+      "Si répondeur: laisser un court message demandant si l'ancien kit a été renvoyé et si le nouveau fonctionne, puis proposer un rappel et raccrocher",
+      "Si occupé ou refus: s'excuser, remercier, raccrocher"
+    ],
+    "speak_disclosure_first": true,
+    "extra_instructions": "Ton amical et professionnel. Priorité: réponses claires oui/non (ou statut) sur le renvoi de l'ancien kit et le fonctionnement du nouveau. Si une question factuelle hors script arrive, utilise ask_orchestrator."
+  },
+  "voice": {
+    "voice": "eve",
+    "keyterms": ["kit", "renvoyé", "remplacement"],
+    "max_duration_seconds": 180,
+    "enable_web_search": false
+  },
+  "metadata": {
+    "orchestrator": "call-agent",
+    "ticket": "demo-return-check"
+  }
+}
