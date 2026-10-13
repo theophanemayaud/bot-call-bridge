@@ -47,7 +47,7 @@ Watch `call.state`: `dialing` → `ringing` / `bridged`. `failed` + `voice.error
 | Event | Your job |
 |---|---|
 | `transcript` | Track goals. Cumulative user text on Grok may rewrite itself — use the latest snapshot |
-| `tool_call` `ask_orchestrator` | Reply in seconds: `POST /v1/calls/{id}/tool-results` `{ "tool_call_id", "output": { "answer": "…" } }` |
+| `tool_call` `ask_orchestrator` | Reply in seconds with a contextual answer (see below): `POST /v1/calls/{id}/tool-results` `{ "tool_call_id", "output": { "answer": "…" } }` |
 | Timeout risk | If you cannot answer, the bridge injects “use fallback, do not invent” |
 | Need a silent steer | `POST …/guidelines` `{ "text": "Wrap up.", "mode": "steer" }` |
 | Need a spoken line | `{ "mode": "speak" }` (Grok `force_message`) |
@@ -58,6 +58,26 @@ Watch `call.state`: `dialing` → `ringing` / `bridged`. `failed` + `voice.error
 | Idle (`idle_timeout`) | Bridge BYEs after `CALL_IDLE_TIMEOUT_SECONDS` (default 30) with no user/assistant speech. Comfort-noise RTP does not count. `0` disables |
 
 Do not tell the callee about tool names or the control plane.
+
+### Answering `ask_orchestrator` (contextual, never canned)
+
+Each delegation is a real question. Read the `tool_call` `arguments` (question + context) **and the last few transcript turns**, then answer with your own judgment. Never auto-reply with a template, a static facts block, or "answer only with these facts" — a background monitor may *forward* tool calls to you, but must not answer them by itself.
+
+Each `answer` is one short, speakable instruction:
+
+1. **Outcome** — what you did, noted, or know (`Noted: Fri 25 Sep remote work, I'll pass it on.`).
+2. **What to say** — the line to confirm aloud, in the call language.
+3. **Next step** — e.g. `Ask if anything else; if not, goodbye then hang up.`
+
+| Situation | Answer |
+|---|---|
+| Fact you have | Just that fact + next step. Not the whole brief |
+| Request to note / do something | Confirm it is noted (or done) + say it aloud + next step |
+| Needs real work or time | Reply **immediately** with a holding line (`Say you're checking, keep them on the line.`), do the work, then `POST …/guidelines` `{ "mode": "speak" }` with the result |
+| Unknown / out of scope | Say so briefly (`I don't have that; offer to follow up.`). Do not invent |
+| Callee is wrapping up / said goodbye | Short confirmation + `Say goodbye and hang up.` Do not ask open questions or reopen the conversation |
+
+Keep it fast (real-time first): answer within a few seconds, one or two sentences. Do not send a `speak`/`steer` that contradicts or reopens a goodbye the model just said.
 
 ## 4. Report the outcome
 

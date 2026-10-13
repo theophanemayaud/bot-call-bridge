@@ -81,6 +81,8 @@ Reply in a few seconds:
 }
 ```
 
+Answers must be contextual: read the question, context and recent transcript, and reply with outcome + what to say + next step. Never a static facts dump. Slow work: immediate holding line, then a `speak` guideline with the result. See `skills/handle-a-call/SKILL.md`.
+
 Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback and **not invent facts**. On GPT-Live the bridge speaks the answer (or the fallback) and continues the backend with tools disabled for that turn, so the same delegation cannot open another unanswered `ask_orchestrator`.
 
 ### `hangup`
