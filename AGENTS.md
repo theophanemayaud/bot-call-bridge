@@ -81,7 +81,7 @@ Reply in a few seconds:
 }
 ```
 
-Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback and **not invent facts**.
+Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback and **not invent facts**. On GPT-Live the bridge speaks the answer (or the fallback) and continues the backend with tools disabled for that turn, so the same delegation cannot open another unanswered `ask_orchestrator`.
 
 ### `hangup`
 

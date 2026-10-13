@@ -156,6 +156,9 @@ def test_compose_live_instructions_keeps_policy_labels():
     assert "Do not sit in silence after the greeting." in text
     assert "Never delegate this when the conversation is already finished" in text
     assert "immediately delegate so the backend calls hangup" in text
+    assert "Do not go silent while you wait." in text
+    assert "do not call any function" in LIVE_BACKEND_INSTRUCTIONS.lower()
+    assert "do not ask for confirmation" in LIVE_BACKEND_INSTRUCTIONS.lower()
 
 
 def test_parse_tool_arguments_json_string_and_object():
@@ -433,6 +436,7 @@ async def test_openai_tool_results_continue_the_responses_backend():
             delegation_id="item_b",
         )
     )
+    await _drain_side_tasks(provider)
     await provider.speak_verbatim("Bonjour.", interruptible=False)
     await provider.inject_guideline("Offer Thursday 14:00.")
     await provider.submit_tool_result(
@@ -451,18 +455,25 @@ async def test_openai_tool_results_continue_the_responses_backend():
         continue_response=False,
     )
 
-    assert sent[0]["type"] == "session.instructions.append"
-    assert sent[0]["delegation_id"] is None
-    assert "Bonjour." in sent[0]["content"]
-    assert sent[1]["type"] == "session.instructions.append"
-    assert "ORCHESTRATOR STEER" in sent[1]["content"]
-    assert sent[2]["type"] == "response.item.create"
-    assert sent[2]["item"]["call_id"] == "call_a"
-    assert json.loads(sent[2]["item"]["output"])["answer"] == "Confirm Tuesday 10:00."
-    assert sent[3]["type"] == "response.item.create"
-    assert sent[3]["item"]["call_id"] == "call_b"
-    assert sent[4]["type"] == "response.create"
-    assert all(item["type"] != "session.commentary.append" for item in sent)
+    instructions = [item for item in sent if item["type"] == "session.instructions.append"]
+    assert instructions[0]["delegation_id"] is None
+    assert "Bonjour." in instructions[0]["content"]
+    assert "ORCHESTRATOR STEER" in instructions[1]["content"]
+    outputs = [item for item in sent if item["type"] == "response.item.create"]
+    assert [item["item"]["call_id"] for item in outputs] == ["call_a", "call_b"]
+    assert json.loads(outputs[0]["item"]["output"])["answer"] == "Confirm Tuesday 10:00."
+    creates = [item for item in sent if item["type"] == "response.create"]
+    assert len(creates) == 2
+    spoken = [
+        item["content"]
+        for item in sent
+        if item["type"] == "session.commentary.append" and "Confirm Tuesday" in item["content"]
+    ]
+    assert spoken
+    assert all(item.get("delegation_id") is None for item in sent if item["type"] == "session.commentary.append")
+    updates = [item for item in sent if item["type"] == "session.update"]
+    assert updates
+    assert updates[0]["session"]["delegation"]["responses"]["tool_choice"] == "none"
 
 
 @pytest.mark.asyncio
@@ -511,6 +522,184 @@ async def test_openai_send_audio_live_shape():
     await provider.send_audio(frame)
     assert sent[0]["type"] == "session.input_audio.append"
     assert sent[0]["audio"] == base64.b64encode(frame).decode("ascii")
+
+
+async def _drain_side_tasks(provider: OpenAILiveProvider) -> None:
+    while provider._side_tasks:
+        await asyncio.gather(*list(provider._side_tasks))
+
+
+@pytest.mark.asyncio
+async def test_answered_delegation_is_spoken_and_repeat_is_not_forwarded():
+    """Same shape as a live call: one delegation, an orchestrator answer, then another ask."""
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    sent: list[dict] = []
+
+    async def fake_send(payload: dict) -> None:
+        sent.append(payload)
+
+    provider._ws = MagicMock()
+    provider._send = fake_send  # type: ignore[method-assign]
+    delegation_id = "item_same"
+    await provider._handle_server_event(
+        {
+            "type": "session.delegation.created",
+            "delegation": {
+                "id": delegation_id,
+                "type": "delegation",
+                "target": "responses",
+                "response_id": "resp_same",
+            },
+        }
+    )
+    await provider._handle_server_event(
+        _function_event(
+            name="ask_orchestrator",
+            call_id="call_1",
+            arguments={"question": "What is on the calendar tomorrow?", "urgency": "normal"},
+            delegation_id=delegation_id,
+        )
+    )
+    await _drain_side_tasks(provider)
+    tools = []
+    while not provider._events.empty():
+        event = await provider._events.get()
+        if event.type == "tool_call":
+            tools.append(event)
+    assert len(tools) == 1
+    assert tools[0].payload["tool_call_id"] == "call_1"
+    assert tools[0].payload["arguments"]["question"] == "What is on the calendar tomorrow?"
+    checking = [
+        item
+        for item in sent
+        if item["type"] == "session.commentary.append" and "checking" in item["content"]
+    ]
+    assert len(checking) == 1
+    assert checking[0]["delegation_id"] is None
+
+    sent.clear()
+    await provider.submit_tool_result(
+        "call_1",
+        {"answer": "Nothing is booked tomorrow. Then say goodbye and hang up."},
+        continue_response=True,
+    )
+    assert any(
+        item["type"] == "session.commentary.append" and "Nothing is booked tomorrow" in item["content"]
+        for item in sent
+    )
+    assert any(
+        item["type"] == "session.update"
+        and item["session"]["delegation"]["responses"]["tool_choice"] == "none"
+        for item in sent
+    )
+    assert any(
+        item["type"] == "response.item.create" and item["item"]["call_id"] == "call_1"
+        for item in sent
+    )
+    assert any(item["type"] == "response.create" for item in sent)
+    # Speech is requested before the backend is continued, so the line is not
+    # waiting on another model pass.
+    kinds = [item["type"] for item in sent]
+    assert kinds.index("session.commentary.append") < kinds.index("response.create")
+
+    sent.clear()
+    await provider._handle_server_event(
+        _function_event(
+            name="ask_orchestrator",
+            call_id="call_2",
+            arguments={"question": "Please confirm I can say that now.", "urgency": "normal"},
+            delegation_id=delegation_id,
+        )
+    )
+    await _drain_side_tasks(provider)
+    assert provider._events.empty()
+    repeat_outputs = [
+        item for item in sent if item["type"] == "response.item.create" and item["item"]["call_id"] == "call_2"
+    ]
+    assert len(repeat_outputs) == 1
+    body = json.loads(repeat_outputs[0]["item"]["output"])
+    assert body["already_answered"] is True
+    assert "Nothing is booked tomorrow" in body["answer"]
+    assert any(item["type"] == "response.create" for item in sent)
+
+    sent.clear()
+    await provider._handle_server_event(
+        _function_event(
+            name="ask_orchestrator",
+            call_id="call_3",
+            arguments={"question": "The last check timed out. What should I say?", "urgency": "normal"},
+            delegation_id=delegation_id,
+        )
+    )
+    await _drain_side_tasks(provider)
+    assert provider._events.empty()
+    third = [
+        item for item in sent if item["type"] == "response.item.create" and item["item"]["call_id"] == "call_3"
+    ]
+    assert len(third) == 1
+    assert not any(item["type"] == "response.create" for item in sent)
+
+    await provider._handle_server_event(
+        {
+            "type": "response.event",
+            "delegation_id": delegation_id,
+            "event": {"type": "response.completed", "response": {"id": "resp_same", "output": []}},
+        }
+    )
+    await _drain_side_tasks(provider)
+    assert any(
+        item["type"] == "session.update"
+        and item["session"]["delegation"]["responses"]["tool_choice"] == "required"
+        for item in sent
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_failure_is_an_error_and_a_spoken_fallback():
+    provider = OpenAILiveProvider(Settings(openai_api_key="test-key"))
+    sent: list[dict] = []
+
+    async def fake_send(payload: dict) -> None:
+        sent.append(payload)
+
+    provider._ws = MagicMock()
+    provider._send = fake_send  # type: ignore[method-assign]
+    provider._tool_choice = "none"
+    await provider._handle_server_event(
+        {
+            "type": "response.event",
+            "delegation_id": "item_fail",
+            "event": {
+                "type": "response.failed",
+                "response": {"status": "failed", "error": {"message": "backend unavailable"}},
+            },
+        }
+    )
+    await _drain_side_tasks(provider)
+    error = await provider._events.get()
+    assert error.type == "error"
+    assert error.payload["message"] == "backend unavailable"
+    assert any(
+        item["type"] == "session.commentary.append" and "could not check" in item["content"]
+        for item in sent
+    )
+    assert any(
+        item["type"] == "session.update"
+        and item["session"]["delegation"]["responses"]["tool_choice"] == "required"
+        for item in sent
+    )
+    sent.clear()
+    await provider._handle_server_event(
+        {
+            "type": "response.event",
+            "delegation_id": "item_fail",
+            "event": {"type": "response.incomplete", "response": {"status": "incomplete"}},
+        }
+    )
+    await _drain_side_tasks(provider)
+    again = await provider._events.get()
+    assert again.type == "error"
+    assert not any(item["type"] == "session.commentary.append" for item in sent)
 
 
 def test_shared_function_tool_shape_and_routes():

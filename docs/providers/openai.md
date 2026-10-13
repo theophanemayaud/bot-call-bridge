@@ -14,7 +14,7 @@ This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/
 | Voicemail | Live instructions: short message (who + why), goodbye, then delegate so the backend calls `hangup`. Do not sit silent after the greeting |
 | Idle hangup | Bridge-wide `CALL_IDLE_TIMEOUT_SECONDS` (default 30) — no user or assistant speech at all, not a goodbye classifier. See `AGENTS.md` |
 | Steers | `session.instructions.append` with `delegation_id: null` (steer and verbatim disclosure) |
-| Orchestrator answers | `response.item.create` (`function_call_output`) then `response.create` so the backend can continue. `hangup` submits the result and does not continue |
+| Orchestrator answers | Speak the answer with `session.commentary.append` (`delegation_id` null). Then `session.update` sets backend `tool_choice` to `none`, `response.item.create` returns `function_call_output`, and `response.create` asks for a final message. `tool_choice` returns to `required` when that response completes. `hangup` submits the result and does not continue |
 | Probe | `POST /v1/voice/probe` |
 
 **PCMA pitfall:** Live **requires** `{"type":"audio/pcma","rate":8000}`. Omitting `rate` (the old Realtime GA trick) is wrong here. SIP still forwards 8 kHz a-law as-is.
@@ -44,6 +44,8 @@ Session start sets:
 ```
 
 `session.delegation.created` is only a timer mark (`target: "responses"`, no tool name). The call arrives later as `response.event` → `response.output_item.done` with a `function_call` item (`call_id`, `name`, `arguments`). An arguments-done event is ignored.
+
+`tool_choice` starts as `required`, so a delegation becomes a named tool. Leaving it required after the result makes the backend call `ask_orchestrator` again (a confirmation) instead of a final message, and Live never speaks the answer. Before `response.create`, the bridge sets `tool_choice` to `none`. Another `ask_orchestrator` on a delegation that already has a result is answered locally with that result. It is not sent to the orchestrator. A checking line is spoken when the orchestrator call opens, so the wait is not silence. That line is one commentary event, not a playout buffer.
 
 | Tool | Who runs it |
 |---|---|

@@ -20,7 +20,11 @@ from call_bridge.voice.provider import (
     VoiceEvent,
     VoiceSessionConfig,
 )
-from call_bridge.voice.tools import default_call_tools, tools_as_openai_functions
+from call_bridge.voice.tools import (
+    ORCHESTRATOR_TOOL_NAMES,
+    default_call_tools,
+    tools_as_openai_functions,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +46,7 @@ Silence and noise policy: Keep listening while the callee pauses to think. Do no
 Delegation policy:
 A backend selects named tools. You do not call tools yourself. Where the SCRIPT says to hang up or ask the orchestrator, delegate so the backend calls that tool.
 Do not mention tools, backend, or delegation to the callee.
-- ask_orchestrator: facts, decisions, and next steps you do not have. Delegate as soon as you need them. Never invent those facts. Never delegate this when the conversation is already finished or you are about to hang up.
+- ask_orchestrator: facts, decisions, and next steps you do not have. Delegate as soon as you need them. Say one short line that you are checking, then wait. Do not go silent while you wait. Never invent those facts. Never delegate this when the conversation is already finished or you are about to hang up.
 - hangup: end the phone call. Speak a short audible goodbye first, then delegate in the same turn so the backend calls hangup.
 
 When the goals are done, the callee says goodbye, or a fallback says to disconnect:
@@ -59,12 +63,12 @@ Do not invent facts while waiting.
 # Stable prefix so Live can cache the backend prompt across delegations.
 LIVE_BACKEND_INSTRUCTIONS = """You select one function for a live phone call. You do not speak to the callee.
 
-Call exactly one function from the tool list. Do not reply in prose. Do not invent a function name.
-
+If this request has no tool result yet, call exactly one function. Do not invent a function name.
 - ask_orchestrator: a fact, decision, or next step is missing. Put it in question. Do not invent the fact.
-- hangup: the voice agent has already said goodbye, the callee asked to stop, or a voicemail was left. End the call. Do not use ask_orchestrator once the call is over.
+- hangup: goodbye was already said, the callee asked to stop, or a voicemail was left. Do not use ask_orchestrator to end the call.
 
-If a tool result has ok=false or error=orchestrator_timeout, pass that instruction through. Do not invent facts.
+If a tool result is already present, do not call any function. Return one short final message the voice model should say. If the result says to hang up, include a short goodbye in that message. Do not ask for confirmation.
+If the result has ok=false or error=orchestrator_timeout, the message is that fallback only. Do not invent facts.
 """
 
 
@@ -192,11 +196,33 @@ def parse_responses_function_call(event: dict[str, Any]) -> ResponsesFunctionCal
     )
 
 
+def _speakable_tool_output(output: dict[str, Any]) -> str:
+    for key in ("answer", "instruction", "summary"):
+        value = output.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return json.dumps(output, ensure_ascii=False)
+
+
 def _clip(text: str, limit: int = _APPEND_CHAR_LIMIT) -> str:
     text = text.strip()
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _backend_failure_message(inner: dict[str, Any]) -> str | None:
+    """Terminal Responses events nested in ``response.event``. Empty if this is not one."""
+    kind = inner.get("type")
+    if kind == "error":
+        return _error_message(inner)
+    if kind not in {"response.failed", "response.incomplete"}:
+        return None
+    response = inner.get("response") if isinstance(inner.get("response"), dict) else inner
+    error = response.get("error") or response.get("incomplete_details") or kind
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("reason") or kind)
+    return str(error)
 
 
 def _error_message(event: dict[str, Any]) -> str:
@@ -228,10 +254,21 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._closing = False
         self._user_speaking = False
         self._seen_call_ids: set[str] = set()
+        self._call_names: dict[str, str] = {}
         self._pending_calls: dict[str, str] = {}
         self._groups: dict[str, set[str]] = {}
         self._delegation_started: dict[str, float] = {}
         self._delegation_tool_count: dict[str, int] = {}
+        # Last orchestrator output per delegation. A later function call on that
+        # same id is settled locally so it cannot sit unanswered.
+        self._answered: dict[str, dict[str, Any]] = {}
+        self._spoken_for: set[str] = set()
+        self._checking_for: set[str] = set()
+        self._repeat_continues: dict[str, int] = {}
+        self._awaiting_final: set[str] = set()
+        self._tool_choice = "required"
+        self._failure_spoken: set[str] = set()
+        self._side_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def name(self) -> str:
@@ -245,10 +282,21 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._server_closed.clear()
         self._user_speaking = False
         self._seen_call_ids.clear()
+        self._call_names.clear()
         self._pending_calls.clear()
         self._groups.clear()
         self._delegation_started.clear()
         self._delegation_tool_count.clear()
+        self._answered.clear()
+        self._spoken_for.clear()
+        self._checking_for.clear()
+        self._repeat_continues.clear()
+        self._awaiting_final.clear()
+        self._tool_choice = "required"
+        self._failure_spoken.clear()
+        for task in list(self._side_tasks):
+            task.cancel()
+        self._side_tasks.clear()
         url = self._settings.openai_live_url
         log.info(
             "connecting openai gpt-live %s backend=%s reasoning=%s",
@@ -294,6 +342,8 @@ class OpenAILiveProvider(VoiceAgentProvider):
 
     async def close(self) -> None:
         self._closing = True
+        for task in list(self._side_tasks):
+            task.cancel()
         if self._ws is not None and self._live_started() and not self._server_closed.is_set():
             try:
                 await self._send({"type": "session.close", "event_id": _event_id("close")})
@@ -367,6 +417,25 @@ class OpenAILiveProvider(VoiceAgentProvider):
             pending.discard(call_id)
             if not pending:
                 self._groups.pop(group, None)
+        name = self._call_names.get(call_id, "")
+        if continue_response and name in ORCHESTRATOR_TOOL_NAMES:
+            # Remember before any await so a repeat on this delegation cannot
+            # open another orchestrator wait.
+            self._answered[group] = output
+            if group not in self._spoken_for:
+                self._spoken_for.add(group)
+                await self._append(
+                    "session.commentary.append",
+                    (
+                        "Tell the callee the following now, in their language, then pause and listen. "
+                        "Do not mention tools:\n"
+                        f"{_speakable_tool_output(output)}"
+                    ),
+                )
+            # tool_choice stays "required" on the session so the next delegation
+            # still picks a named tool. This continuation must be a final message,
+            # otherwise the backend calls ask_orchestrator again and Live stays silent.
+            await self._set_tool_choice("none")
         await self._send(
             {
                 "type": "response.item.create",
@@ -379,9 +448,11 @@ class OpenAILiveProvider(VoiceAgentProvider):
             }
         )
         # Hangup must not start another backend turn (that can talk over the goodbye).
-        # Other still-open calls keep the response parked until each result is in.
-        if not continue_response or self._pending_calls:
+        # Other still-open calls on this delegation keep the response parked.
+        group_open = bool(self._groups.get(group))
+        if not continue_response or group_open:
             return
+        self._awaiting_final.add(group)
         await self._send({"type": "response.create", "event_id": _event_id("cont")})
 
     async def events(self) -> AsyncIterator[VoiceEvent]:
@@ -390,6 +461,36 @@ class OpenAILiveProvider(VoiceAgentProvider):
             yield event
             if event.type == "closed":
                 return
+
+    async def _set_tool_choice(self, choice: str) -> None:
+        if self._ws is None or self._tool_choice == choice:
+            return
+        self._tool_choice = choice
+        log.info("openai live backend tool_choice=%s", choice)
+        await self._send(
+            {
+                "type": "session.update",
+                "event_id": _event_id("upd"),
+                "session": {
+                    "delegation": {
+                        "responses": {"tool_choice": choice},
+                    },
+                },
+            }
+        )
+
+    def _spawn(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._side_tasks.add(task)
+        task.add_done_callback(self._side_done)
+
+    def _side_done(self, task: asyncio.Task[None]) -> None:
+        self._side_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("openai live side task failed: %s", exc)
 
     async def _append(self, type_: str, content: str) -> None:
         # Responses-mode updates use a null delegation id. A client delegation id
@@ -488,11 +589,34 @@ class OpenAILiveProvider(VoiceAgentProvider):
         inner = event.get("event")
         if not isinstance(inner, dict):
             return
+        failure = _backend_failure_message(inner)
+        if failure:
+            delegation_id = event.get("delegation_id")
+            if not isinstance(delegation_id, str):
+                delegation_id = None
+            log.warning(
+                "openai live backend failure delegation_id=%s message=%s",
+                delegation_id or "",
+                failure,
+            )
+            await self._events.put(VoiceEvent(type="error", payload={"message": failure}))
+            key = delegation_id or ""
+            if self._ws is not None and key not in self._failure_spoken:
+                self._failure_spoken.add(key)
+                self._spawn(self._say_backend_failure())
+            if self._tool_choice == "none":
+                self._spawn(self._set_tool_choice("required"))
+            return
         if inner.get("type") != "response.completed":
             return
         delegation_id = event.get("delegation_id")
         if not isinstance(delegation_id, str):
             delegation_id = None
+        if delegation_id and delegation_id in self._awaiting_final:
+            self._awaiting_final.discard(delegation_id)
+            # Next delegation must be able to call a named tool again.
+            self._spawn(self._set_tool_choice("required"))
+            return
         count = self._delegation_tool_count.get(delegation_id or "", 0)
         if count == 0:
             log.warning(
@@ -501,18 +625,82 @@ class OpenAILiveProvider(VoiceAgentProvider):
                 self._delegation_ms(delegation_id),
             )
 
-    async def _emit_function_call(self, call: ResponsesFunctionCall) -> None:
-        if call.call_id in self._seen_call_ids:
-            log.info("openai live duplicate function call call_id=%s", call.call_id)
-            return
-        self._seen_call_ids.add(call.call_id)
+    def _remember_call(self, call: ResponsesFunctionCall) -> str:
         group = call.delegation_id or call.response_id or call.call_id
+        self._call_names[call.call_id] = call.name
         self._pending_calls[call.call_id] = group
         self._groups.setdefault(group, set()).add(call.call_id)
         if call.delegation_id:
             self._delegation_tool_count[call.delegation_id] = (
                 self._delegation_tool_count.get(call.delegation_id, 0) + 1
             )
+        return group
+
+    async def _say_backend_failure(self) -> None:
+        await self._append(
+            "session.commentary.append",
+            (
+                "Say one short sentence that you could not check that just now, "
+                "then use a SCRIPT fallback. Do not invent the fact."
+            ),
+        )
+
+    async def _say_checking(self, delegation_id: str | None) -> None:
+        key = delegation_id or ""
+        if key in self._checking_for or self._ws is None:
+            return
+        self._checking_for.add(key)
+        await self._append(
+            "session.commentary.append",
+            (
+                "Say one short sentence that you are checking, then pause. "
+                "Do not invent the fact. Do not go silent."
+            ),
+        )
+
+    async def _settle_repeat(self, call: ResponsesFunctionCall, group: str) -> None:
+        """Answer a second function call on a delegation that already has a result."""
+        previous = self._answered.get(group) or {}
+        speakable = _speakable_tool_output(previous)
+        output = {
+            "ok": True,
+            "already_answered": True,
+            "answer": speakable,
+            "instruction": (
+                "Already answered on this delegation. Speak that answer to the callee now. "
+                "Do not call a tool and do not ask for confirmation."
+            ),
+        }
+        # One continuation after the repeat, with tools disabled. Further calls
+        # only receive the output so the backend cannot loop on the orchestrator.
+        repeats = self._repeat_continues.get(group, 0)
+        self._repeat_continues[group] = repeats + 1
+        log.info(
+            "openai live repeat %s call_id=%s delegation_id=%s settled locally",
+            call.name,
+            call.call_id,
+            group,
+        )
+        await self.submit_tool_result(
+            call.call_id,
+            output,
+            continue_response=repeats == 0,
+        )
+
+    async def _emit_function_call(self, call: ResponsesFunctionCall) -> None:
+        if call.call_id in self._seen_call_ids:
+            log.info("openai live duplicate function call call_id=%s", call.call_id)
+            return
+        self._seen_call_ids.add(call.call_id)
+        group = call.delegation_id or call.response_id or call.call_id
+        if (
+            call.name in ORCHESTRATOR_TOOL_NAMES
+            and group in self._answered
+        ):
+            self._remember_call(call)
+            self._spawn(self._settle_repeat(call, group))
+            return
+        self._remember_call(call)
         delay_ms = self._delegation_ms(call.delegation_id)
         log.info(
             "openai live tool %s call_id=%s delegation_id=%s delegation_ms=%s",
@@ -521,6 +709,8 @@ class OpenAILiveProvider(VoiceAgentProvider):
             call.delegation_id or "",
             delay_ms,
         )
+        if call.name in ORCHESTRATOR_TOOL_NAMES and self._ws is not None:
+            self._spawn(self._say_checking(call.delegation_id))
         await self._emit_tool_call(call.name, call.call_id, call.arguments)
 
     async def _handle_server_event(self, event: dict[str, Any]) -> None:
