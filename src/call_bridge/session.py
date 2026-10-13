@@ -14,7 +14,7 @@ from call_bridge.sip.endpoint import SipEndpoint
 from call_bridge.sip.protocol import PCMA_FRAME_BYTES, PCMA_SILENCE
 from call_bridge.voice.factory import create_voice_provider
 from call_bridge.voice.provider import VoiceAgentProvider, VoiceEvent, VoiceSessionConfig
-from call_bridge.voice.tools import default_call_tools
+from call_bridge.voice.tools import default_call_tools, tool_route
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +192,7 @@ class _LiveCall:
         self._play_buf = bytearray()
         self._last_activity = time.monotonic()
         self._orchestrator_tasks: set[asyncio.Task[None]] = set()
+        self._hangup_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         record = self.record
@@ -377,18 +378,42 @@ class _LiveCall:
             task.cancel()
 
     async def _dispatch_tool_call(self, payload: dict[str, Any]) -> None:
-        """Hangup must not wait behind ask_orchestrator (Live can emit both)."""
-        tool = payload.get("tool")
+        """Route named tools. Hangup must not block the audio consumer or an orchestrator wait.
+
+        A future local tool such as dial_digits (DTMF) belongs in this function,
+        next to hangup, so it runs here instead of going to the orchestrator.
+        """
+        tool = str(payload.get("tool") or "")
         if tool == "hangup":
+            if self._hangup.is_set() or (
+                self._hangup_task is not None and not self._hangup_task.done()
+            ):
+                return
             self._cancel_pending_orchestrator()
-            await self._on_tool_call(payload)
+            self._hangup_task = asyncio.create_task(
+                self._run_hangup_tool(payload),
+                name="hangup-tool",
+            )
             return
-        if tool == "ask_orchestrator":
+        if tool_route(tool) == "orchestrator":
             task = asyncio.create_task(self._on_tool_call(payload), name="ask-orchestrator")
             self._orchestrator_tasks.add(task)
             task.add_done_callback(self._orchestrator_tasks.discard)
             return
         await self._on_tool_call(payload)
+
+    async def _run_hangup_tool(self, payload: dict[str, Any]) -> None:
+        try:
+            await self._on_tool_call(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("hangup tool failed for call %s", self.record.id)
+            if not self._hangup.is_set():
+                arguments = payload.get("arguments") or {}
+                self._hangup_reason = str(arguments.get("reason") or "agent")
+                self.record.hangup_reason = self._hangup_reason
+                self._hangup.set()
 
     async def _on_tool_call(self, payload: dict[str, Any]) -> None:
         tool = payload.get("tool")
@@ -456,6 +481,13 @@ class _LiveCall:
     async def _teardown(self) -> None:
         reason = self._hangup_reason
         self._cancel_pending_orchestrator()
+        hangup_task = self._hangup_task
+        if hangup_task is not None and not hangup_task.done():
+            hangup_task.cancel()
+            try:
+                await hangup_task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             await self.manager.sip.hangup(self.record.id, reason=reason)
         except Exception as exc:

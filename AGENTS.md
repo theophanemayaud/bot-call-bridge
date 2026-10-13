@@ -19,7 +19,7 @@ Also true and durable:
 - **Ownership** — Call / orchestrator owns SCRIPT + tool answers; this bridge owns SIP / RTP / voice WS.
 - **One line** — `MAX_CONCURRENT_CALLS=1`. Fail a second `start_call`.
 - **Voicemail** — short message (who + why), goodbye, hang up. Do not sit in silence after a greeting. Idle safety net: `CALL_IDLE_TIMEOUT_SECONDS` (default 30, `0` disables).
-- **OpenAI path** — GPT-Live-1 (`VOICE_PROVIDER=openai`). Not OpenAI Realtime VAD (`/v1/realtime`, `semantic_vad`, `interrupt_response`).
+- **OpenAI path** — GPT-Live-1 (`VOICE_PROVIDER=openai`) with responses delegation and named `hangup` / `ask_orchestrator` tools. Not OpenAI Realtime VAD (`/v1/realtime`, `semantic_vad`, `interrupt_response`). The bridge does not choose those tools from spoken words.
 
 ## Architecture
 
@@ -85,7 +85,7 @@ Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback a
 
 ### `hangup`
 
-The model calls `hangup` (Grok / function tools) or Live client-delegates after a spoken goodbye. The bridge classifies Live `session.delegation.created` from the current closer (bye / take care / au revoir / I'll hang up). If the model says it will hang up and never delegates, a short idle settle still BYEs (`hangup_reason=spoken_goodbye`). The bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
+The model calls the named `hangup` tool (Grok function tools, or GPT-Live responses delegation). The bridge does not infer `hangup` or `ask_orchestrator` from spoken words. It ACKs `hangup`, lets queued goodbye audio play, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. If Live says goodbye and never calls `hangup`, the orchestrator — which still receives live transcripts and tool events — hangs up with `POST /v1/calls/{id}/hangup`. The control API can hang up at any time.
 
 **Voicemail:** SCRIPT + Live instructions tell the agent to leave a short message (who + why), say goodbye, then hang up. Do not sit in silence after a greeting.
 
@@ -96,7 +96,7 @@ The model calls `hangup` (Grok / function tools) or Live client-delegates after 
 `VoiceAgentProvider` in `src/call_bridge/voice/provider.py` is the only interface SIP/RTP talks to.
 
 - **Grok** — implemented.
-- **OpenAI GPT-Live-1** — implemented (`VOICE_PROVIDER=openai`, PCMA duplex, client delegation).
+- **OpenAI GPT-Live-1** — implemented (`VOICE_PROVIDER=openai`, PCMA duplex, responses delegation, named `hangup` and `ask_orchestrator`).
 - **mock** — `BRIDGE_MODE=mock`.
 
 Native wire audio is **PCMA 8 kHz**. Do not add a resample path unless a future voice provider cannot take PCMA.

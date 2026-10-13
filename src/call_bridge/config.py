@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     openai_live_url: str = "wss://api.openai.com/v1/live/sessions"
     openai_live_model: str = "gpt-live-1"
     openai_voice: str = "marin"
+    # Responses backend that picks named tools. gpt-6-luna is the cheap Live default.
+    # reasoning effort "none" skips reasoning tokens (fastest). Raise it if routing misses.
+    openai_live_backend_model: str = "gpt-6-luna"
+    openai_live_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "none"
+    openai_live_service_tier: Literal["auto", "default", "flex", "priority"] = "auto"
+    openai_live_max_output_tokens: int = Field(default=256, ge=16)
 
     # Provider-specific. Leave empty in mock mode. Live requires registrar + domain + creds.
     sip_registrar: str = ""

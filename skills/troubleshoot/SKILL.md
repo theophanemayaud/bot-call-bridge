@@ -59,6 +59,8 @@ Symptoms: first call works; later REGISTER refresh fails; or INVITE 403 after a 
 
 `POST /v1/voice/probe` — live Grok / GPT-Live should return `ok`. 502/auth errors → `XAI_API_KEY` / `OPENAI_API_KEY`. Pass `{"provider":"openai"}` to probe GPT-Live while defaulting to Grok. One-way noise on OpenAI: confirm Live `audio.format` includes `rate: 8000` for PCMA (do not copy the old Realtime omit-rate trick).
 
+A Live goodbye that never becomes a `hangup` tool call is not a bridge classifier bug. The bridge does not hang up from words. Watch the transcript and `POST /v1/calls/{id}/hangup`. Logs show `delegation_ms` from delegation to the named tool.
+
 ## After a fix
 
 Re-check `/health` then place a short SCRIPT via **handle-a-call**. Do not log or commit passwords.
