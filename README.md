@@ -88,7 +88,7 @@ Agent context (goals, ownership, what not to add) and Call-agent contract: [`AGE
 
 ## Voice providers
 
-- **Grok** — `wss://api.x.ai/v1/realtime`, native `audio/pcma`, `server_vad`, function tools, `force_message`.
+- **Grok Voice 3.0** — `wss://api.x.ai/v1/realtime?model=grok-voice-3.0` (pinned; `grok-voice-latest` is the alias). Native `audio/pcma` 8 kHz, `server_vad`, named function tools `hangup` and `ask_orchestrator`. The bridge does not guess those from spoken words. `reasoning.effort=none` (server default is `high`). Disclosure still uses `force_message`. Audio **$0.08/min** ($4.80/hr); a non-audio `conversation.item.create` is **$0.004** (`function_call_output` is not). See [docs/providers/xai-grok.md](docs/providers/xai-grok.md).
 - **OpenAI GPT-Live-1** — `wss://api.openai.com/v1/live/sessions`, native `audio/pcma` @ 8 kHz (rate required), client delegation for hangup / ask_orchestrator (goodbye / "I'll hang up" classified as hangup; explicit hangup speech still BYEs if the model never delegates). Set `VOICE_PROVIDER=openai` plus `OPENAI_API_KEY`, optional `OPENAI_LIVE_MODEL` / `OPENAI_VOICE` (e.g. `marin`, `cedar`). `speak_verbatim` uses `session.instructions.append` (no Grok `force_message`).
 
 ## Add a VoIP provider

@@ -35,6 +35,32 @@ def test_script_rejected_when_empty_goals(client):
     assert res.status_code == 422
 
 
+def test_mock_call_streams_transcript_and_tool(client):
+    res = client.post("/v1/calls", json={"script": SAMPLE, "provider": "mock"})
+    assert res.status_code == 200, res.text
+    call_id = res.json()["id"]
+    seen: list[dict] = []
+    with client.websocket_connect(f"/v1/calls/{call_id}/events") as ws:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            event = ws.receive_json()
+            seen.append(event)
+            if event.get("type") == "tool_call" and event.get("tool") == "ask_orchestrator":
+                break
+    kinds = {event["type"] for event in seen}
+    assert "transcript" in kinds
+    assert "tool_call" in kinds
+    tool = next(event for event in seen if event.get("type") == "tool_call")
+    assert tool["arguments"]["question"]
+    user_lines = [
+        event.get("text")
+        for event in seen
+        if event.get("type") == "transcript" and event.get("role") == "user"
+    ]
+    assert any(user_lines)
+    client.post(f"/v1/calls/{call_id}/hangup", json={"reason": "cleanup"})
+
+
 def test_mock_call_lifecycle(client):
     res = client.post("/v1/calls", json={"script": SAMPLE, "provider": "mock"})
     assert res.status_code == 200, res.text

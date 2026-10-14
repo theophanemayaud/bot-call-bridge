@@ -104,12 +104,13 @@ async def _wait_record(record, *, states: set[str], timeout: float = 3.0):
 async def _start_quiet_call(
     *,
     idle_seconds: float,
+    hangup_grace_seconds: float = 0.0,
     voice: QuietVoice | None = None,
 ) -> tuple[CallManager, CallScript, QuietVoice, Any]:
     settings = Settings(
         bridge_mode="mock",
         call_idle_timeout_seconds=idle_seconds,
-        hangup_grace_seconds=0.0,
+        hangup_grace_seconds=hangup_grace_seconds,
     )
     sip = MockSipEndpoint()
     await sip.start()
@@ -175,6 +176,160 @@ async def test_idle_timeout_disabled_when_zero():
         await manager.hangup(record.id, reason="cleanup")
         await _wait_record(record, states={"ended", "failed"})
         assert record.hangup_reason == "cleanup"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_spoken_goodbye_does_not_hang_up():
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="transcript",
+                payload={"role": "assistant", "text": "Bye, I'll hang up now.", "final": True},
+            )
+        )
+        await asyncio.sleep(0.3)
+        assert record.state == "bridged"
+        assert record.hangup_reason is None
+        texts = [
+            event.payload.get("text")
+            for event in manager.bus.history(record.id)
+            if event.type == "transcript"
+        ]
+        assert "Bye, I'll hang up now." in texts
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_hangup_keeps_transcripts_flowing():
+    manager, _script, voice, record = await _start_quiet_call(
+        idle_seconds=0,
+        hangup_grace_seconds=0.6,
+    )
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "hangup",
+                    "tool_call_id": "h-live",
+                    "arguments": {"reason": "completed"},
+                },
+            )
+        )
+        voice.push(VoiceEvent(type="audio.out", payload={"pcm": b"\xd5" * 160 * 8}))
+        voice.push(
+            VoiceEvent(
+                type="transcript",
+                payload={"role": "assistant", "text": "Au revoir.", "final": True},
+            )
+        )
+        seen = False
+        deadline = asyncio.get_running_loop().time() + 0.35
+        while asyncio.get_running_loop().time() < deadline:
+            texts = [
+                event.payload.get("text")
+                for event in manager.bus.history(record.id)
+                if event.type == "transcript"
+            ]
+            if "Au revoir." in texts and record.state == "bridged":
+                seen = True
+                break
+            await asyncio.sleep(0.02)
+        assert seen, f"transcript did not arrive while bridged; state={record.state}"
+        await _wait_record(record, states={"ended", "failed"}, timeout=3.0)
+        assert record.state == "ended"
+        assert record.hangup_reason == "completed"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+class _RecordingVoice(QuietVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checking: list[str | None] = []
+
+    async def offer_checking_context(self, call_id: str | None = None) -> None:
+        self.checking.append(call_id)
+
+
+@pytest.mark.asyncio
+async def test_ask_orchestrator_offers_soft_context_without_blocking_transcript():
+    voice = _RecordingVoice()
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0, voice=voice)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch-live",
+                    "arguments": {"question": "Which slot?"},
+                },
+            )
+        )
+        voice.push(
+            VoiceEvent(
+                type="transcript",
+                payload={"role": "user", "text": "Tuesday or Thursday?", "final": True},
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline:
+            texts = [
+                event.payload.get("text")
+                for event in manager.bus.history(record.id)
+                if event.type == "transcript"
+            ]
+            if voice.checking and "Tuesday or Thursday?" in texts:
+                break
+            await asyncio.sleep(0.02)
+        assert len(voice.checking) == 1
+        assert record.state == "waiting_orchestrator"
+        tools = [event for event in manager.bus.history(record.id) if event.type == "tool_call"]
+        assert tools[-1].payload["arguments"]["question"] == "Which slot?"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_parallel_asks_share_one_checking_turn():
+    voice = _RecordingVoice()
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0, voice=voice)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch-a",
+                    "arguments": {"question": "Which day?"},
+                },
+            )
+        )
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch-b",
+                    "arguments": {"question": "Which time?"},
+                },
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline and not voice.checking:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
+        assert voice.checking == [None]
+        assert set(record.pending_tools) == {"orch-a", "orch-b"}
     finally:
         if record.state not in {"ended", "failed"}:
             await manager.hangup(record.id, reason="cleanup")

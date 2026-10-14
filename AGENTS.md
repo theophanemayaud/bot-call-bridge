@@ -83,11 +83,15 @@ Reply in a few seconds:
 
 Answers must be contextual: read the question, context and recent transcript, and reply with outcome + what to say + next step. Never a static facts dump. Slow work: immediate holding line, then a `speak` guideline with the result. See `skills/handle-a-call/SKILL.md`.
 
-Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback and **not invent facts**.
+Timeout (`TOOL_TIMEOUT_SECONDS`): the bridge tells the model to use a fallback and **not invent facts**. On Grok, while that wait is in flight the bridge gives the model soft context only: the orchestrator is checking and may take a few seconds, and the model may tell the person if it wants. That is not a `force_message`.
 
 ### `hangup`
 
-The model calls `hangup` (Grok / function tools) or Live client-delegates after a spoken goodbye. The bridge classifies Live `session.delegation.created` from the current closer (bye / take care / au revoir / I'll hang up). If the model says it will hang up and never delegates, a short idle settle still BYEs (`hangup_reason=spoken_goodbye`). The bridge ACKs, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. The control API can hang up at any time.
+On Grok Voice the model calls the named `hangup` function. The bridge does not infer `hangup` or `ask_orchestrator` from spoken words. It ACKs the function, lets queued goodbye audio play, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. Transcript and tool events keep flowing while that audio plays. If the model says goodbye and never calls `hangup`, the orchestrator — which still receives the live transcript — hangs up with `POST /v1/calls/{id}/hangup`.
+
+On GPT-Live-1 the bridge still classifies `session.delegation.created` from the current closer (bye / take care / au revoir / I'll hang up). If the model says it will hang up and never delegates, a short idle settle still BYEs (`hangup_reason=spoken_goodbye`).
+
+The control API can hang up at any time.
 
 **Voicemail:** SCRIPT + Live instructions tell the agent to leave a short message (who + why), say goodbye, then hang up. Do not sit in silence after a greeting.
 
@@ -97,7 +101,7 @@ The model calls `hangup` (Grok / function tools) or Live client-delegates after 
 
 `VoiceAgentProvider` in `src/call_bridge/voice/provider.py` is the only interface SIP/RTP talks to.
 
-- **Grok** — implemented.
+- **Grok Voice 3.0** — implemented (`VOICE_PROVIDER=grok`, PCMA, `server_vad`, named `hangup` and `ask_orchestrator`).
 - **OpenAI GPT-Live-1** — implemented (`VOICE_PROVIDER=openai`, PCMA duplex, client delegation).
 - **mock** — `BRIDGE_MODE=mock`.
 

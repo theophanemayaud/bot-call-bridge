@@ -28,9 +28,13 @@ class Settings(BaseSettings):
 
     xai_api_key: str = ""
     xai_realtime_url: str = "wss://api.x.ai/v1/realtime"
-    xai_voice_model: str = "grok-voice-think-fast-2.0"
+    # Pinned flagship. grok-voice-latest is the alias; production pins the version.
+    xai_voice_model: str = "grok-voice-3.0"
     xai_voice: str = "eve"
+    # Live user captions require this model on audio.input.transcription.
     xai_transcribe_model: str = "grok-transcribe"
+    # Server default is "high". "none" skips reasoning on the phone happy path.
+    xai_reasoning_effort: Literal["none", "high"] = "none"
 
     openai_api_key: str = ""
     openai_live_url: str = "wss://api.openai.com/v1/live/sessions"

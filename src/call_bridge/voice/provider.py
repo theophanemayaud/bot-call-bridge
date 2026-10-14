@@ -112,6 +112,15 @@ class VoiceAgentProvider(ABC):
     ) -> None:
         """Return a function-call result and optionally ask the model to continue."""
 
+    async def offer_checking_context(self, call_id: str | None = None) -> None:
+        """Soft context while ask_orchestrator is in flight.
+
+        The model may tell the callee it is looking something up. This must not
+        force a scripted line. Providers that have no separate commentary
+        channel override it. The default does nothing.
+        """
+        return
+
     @abstractmethod
     def events(self) -> AsyncIterator[VoiceEvent]:
         """Live event stream for the call session / orchestrator."""

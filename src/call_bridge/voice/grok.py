@@ -14,11 +14,12 @@ from websockets.asyncio.client import ClientConnection
 from call_bridge.config import Settings
 from call_bridge.voice.provider import (
     AudioFormat,
+    TurnDetection,
     VoiceAgentProvider,
     VoiceEvent,
     VoiceSessionConfig,
 )
-from call_bridge.voice.tools import tools_as_openai_functions
+from call_bridge.voice.tools import ORCHESTRATOR_CHECKING_CONTEXT, tools_as_openai_functions
 
 log = logging.getLogger(__name__)
 
@@ -40,11 +41,18 @@ def _format_type(fmt: AudioFormat) -> str:
     }[fmt.encoding]
 
 
-def _audio_block(fmt: AudioFormat, *, transcribe_model: str | None, language: str | None, keyterms: list[str]) -> dict[str, Any]:
+def _audio_block(
+    fmt: AudioFormat,
+    *,
+    transcribe_model: str | None,
+    language: str | None,
+    keyterms: list[str],
+) -> dict[str, Any]:
     block: dict[str, Any] = {
         "format": {"type": _format_type(fmt)},
         "transport": fmt.transport,
     }
+    # rate is documented for audio/pcm only. PCMA and PCMU are 8000 Hz.
     if fmt.encoding == "pcm16":
         block["format"]["rate"] = fmt.sample_rate_hz
     transcription: dict[str, Any] = {}
@@ -53,10 +61,61 @@ def _audio_block(fmt: AudioFormat, *, transcribe_model: str | None, language: st
     if language:
         transcription["language_hint"] = language
     if keyterms:
-        transcription["keyterms"] = keyterms[:100]
+        # Docs: max 100 terms, each up to 50 characters.
+        transcription["keyterms"] = [term[:50] for term in keyterms[:100]]
     if transcription:
         block["transcription"] = transcription
     return block
+
+
+def grok_turn_detection(turn: TurnDetection) -> dict[str, Any] | None:
+    """Map shared turn config onto the Speech to Speech session field.
+
+    Grok documents ``server_vad`` or ``null``. The shared default name
+    ``semantic_vad`` is not a Grok mode, so a phone session uses ``server_vad``.
+    ``none`` is manual (``null``). Only documented keys are sent: ``type`` and,
+    when set, ``idle_timeout_ms``.
+    """
+    if turn.kind == "none":
+        return None
+    payload: dict[str, Any] = {"type": "server_vad"}
+    if turn.idle_timeout_ms is not None:
+        payload["idle_timeout_ms"] = turn.idle_timeout_ms
+    return payload
+
+
+def build_grok_session(config: VoiceSessionConfig, settings: Settings) -> dict[str, Any]:
+    """``session.update`` body for Grok Voice 3.0 (PCMA, server VAD, function tools)."""
+    tools = list(config.tools)
+    encoded = tools_as_openai_functions(tools)
+    if config.enable_web_search:
+        encoded.append({"type": "web_search"})
+    return {
+        "voice": config.voice or settings.xai_voice,
+        "instructions": config.instructions,
+        "reasoning": {"effort": settings.xai_reasoning_effort},
+        "turn_detection": grok_turn_detection(config.turn_detection),
+        "audio": {
+            "input": _audio_block(
+                config.audio_in,
+                transcribe_model=config.transcribe_model or settings.xai_transcribe_model,
+                language=config.language,
+                keyterms=config.keyterms,
+            ),
+            "output": _audio_block(
+                config.audio_out,
+                transcribe_model=None,
+                language=None,
+                keyterms=[],
+            ),
+        },
+        "tools": encoded,
+    }
+
+
+def grok_realtime_url(base_url: str, model: str) -> str:
+    query = urlencode({"model": model})
+    return f"{base_url}?{query}"
 
 
 class GrokVoiceProvider(VoiceAgentProvider):
@@ -70,6 +129,11 @@ class GrokVoiceProvider(VoiceAgentProvider):
         self._closed = asyncio.Event()
         self._pending_tool_calls = 0
         self._config: VoiceSessionConfig | None = None
+        self._seen_call_ids: set[str] = set()
+        self._settled_calls: set[str] = set()
+        self._checking_turn = False
+        self._response_finished = asyncio.Event()
+        self._response_finished.set()
 
     @property
     def name(self) -> str:
@@ -79,8 +143,7 @@ class GrokVoiceProvider(VoiceAgentProvider):
         if not self._settings.xai_api_key:
             raise RuntimeError("XAI_API_KEY is empty")
         self._config = config
-        query = urlencode({"model": self._settings.xai_voice_model})
-        url = f"{self._settings.xai_realtime_url}?{query}"
+        url = grok_realtime_url(self._settings.xai_realtime_url, self._settings.xai_voice_model)
         log.info("connecting grok voice %s", self._settings.xai_voice_model)
         self._ws = await websockets.connect(
             url,
@@ -91,45 +154,11 @@ class GrokVoiceProvider(VoiceAgentProvider):
         )
         self._closed.clear()
         self._reader = asyncio.create_task(self._read_loop(), name="grok-reader")
-        await self._send({"type": "session.update", "session": self._session_payload(config)})
+        await self._send(
+            {"type": "session.update", "session": build_grok_session(config, self._settings)}
+        )
         if config.speak_first:
             await self.speak_verbatim(config.speak_first, interruptible=False)
-
-    def _session_payload(self, config: VoiceSessionConfig) -> dict[str, Any]:
-        turn: dict[str, Any] | None
-        if config.turn_detection.kind == "server_vad":
-            turn = {"type": "server_vad"}
-            if config.turn_detection.threshold is not None:
-                turn["threshold"] = config.turn_detection.threshold
-            if config.turn_detection.silence_duration_ms is not None:
-                turn["silence_duration_ms"] = config.turn_detection.silence_duration_ms
-            if config.turn_detection.prefix_padding_ms is not None:
-                turn["prefix_padding_ms"] = config.turn_detection.prefix_padding_ms
-            if config.turn_detection.idle_timeout_ms is not None:
-                turn["idle_timeout_ms"] = config.turn_detection.idle_timeout_ms
-        else:
-            turn = None
-        return {
-            "voice": config.voice or self._settings.xai_voice,
-            "instructions": config.instructions,
-            "turn_detection": turn,
-            "audio": {
-                "input": _audio_block(
-                    config.audio_in,
-                    transcribe_model=config.transcribe_model or self._settings.xai_transcribe_model,
-                    language=config.language,
-                    keyterms=config.keyterms,
-                ),
-                "output": _audio_block(
-                    config.audio_out,
-                    transcribe_model=None,
-                    language=None,
-                    keyterms=[],
-                ),
-            },
-            "tools": tools_as_openai_functions(config.tools)
-            + ([{"type": "web_search"}] if config.enable_web_search else []),
-        }
 
     async def close(self) -> None:
         self._closed.set()
@@ -198,6 +227,26 @@ class GrokVoiceProvider(VoiceAgentProvider):
             }
         )
 
+    async def offer_checking_context(self, call_id: str | None = None) -> None:
+        """One per-response instruction while ask_orchestrator is unanswered.
+
+        ``response.instructions`` apply only to that response. The note is not
+        written into conversation history. A second call while the turn is open
+        does not send another ``response.create``.
+        """
+        if self._ws is None or self._checking_turn:
+            return
+        if call_id and call_id in self._settled_calls:
+            return
+        self._checking_turn = True
+        self._response_finished.clear()
+        await self._send(
+            {
+                "type": "response.create",
+                "response": {"instructions": ORCHESTRATOR_CHECKING_CONTEXT},
+            }
+        )
+
     async def submit_tool_result(
         self,
         call_id: str,
@@ -207,6 +256,7 @@ class GrokVoiceProvider(VoiceAgentProvider):
     ) -> None:
         if self._ws is None:
             raise RuntimeError("voice session is not connected")
+        self._settled_calls.add(call_id)
         await self._send(
             {
                 "type": "conversation.item.create",
@@ -219,6 +269,12 @@ class GrokVoiceProvider(VoiceAgentProvider):
         )
         self._pending_tool_calls = max(0, self._pending_tool_calls - 1)
         if continue_response and self._pending_tool_calls == 0:
+            if self._checking_turn:
+                try:
+                    await asyncio.wait_for(self._response_finished.wait(), timeout=8)
+                except TimeoutError:
+                    log.warning("grok checking turn did not finish before tool continuation")
+                self._checking_turn = False
             await self._send({"type": "response.create"})
 
     async def events(self) -> AsyncIterator[VoiceEvent]:
@@ -292,7 +348,15 @@ class GrokVoiceProvider(VoiceAgentProvider):
                     )
                 )
             return
+        if kind == "response.created" and self._checking_turn:
+            self._response_finished.clear()
+            return
         if kind == "response.function_call_arguments.done":
+            call_id = event.get("call_id")
+            if isinstance(call_id, str) and call_id in self._seen_call_ids:
+                return
+            if isinstance(call_id, str) and call_id:
+                self._seen_call_ids.add(call_id)
             self._pending_tool_calls += 1
             arguments = event.get("arguments") or "{}"
             if isinstance(arguments, str):
@@ -301,22 +365,28 @@ class GrokVoiceProvider(VoiceAgentProvider):
                 except json.JSONDecodeError:
                     parsed = {"raw": arguments}
             else:
-                parsed = arguments
+                parsed = arguments if isinstance(arguments, dict) else {"raw": arguments}
             await self._events.put(
                 VoiceEvent(
                     type="tool_call",
                     payload={
                         "tool": event.get("name"),
-                        "tool_call_id": event.get("call_id"),
+                        "tool_call_id": call_id,
                         "arguments": parsed,
                     },
                 )
             )
             return
         if kind == "response.done":
+            self._response_finished.set()
+            if self._checking_turn:
+                self._checking_turn = False
             await self._events.put(VoiceEvent(type="response.done", payload=event))
             return
         if kind == "error":
+            if self._checking_turn:
+                self._checking_turn = False
+                self._response_finished.set()
             await self._events.put(
                 VoiceEvent(type="error", payload={"message": event.get("error") or event})
             )

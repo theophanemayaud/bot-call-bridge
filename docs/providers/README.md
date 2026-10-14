@@ -45,6 +45,6 @@ Then link the file from the table below and from `skills/setup/SKILL.md`.
 | Provider | Switch | Doc |
 |---|---|---|
 | **OpenAI GPT-Live-1** | `VOICE_PROVIDER=openai` + `OPENAI_API_KEY` | [openai.md](openai.md) |
-| **xAI Grok Voice** | `VOICE_PROVIDER=grok` + `XAI_API_KEY` | [xai-grok.md](xai-grok.md) |
+| **xAI Grok Voice 3.0** | `VOICE_PROVIDER=grok` + `XAI_API_KEY` | [xai-grok.md](xai-grok.md) |
 
 Do not add Twilio/Telnyx as required for MVP. Optional later providers get their own markdown — no code fork.
