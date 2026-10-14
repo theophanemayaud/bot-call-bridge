@@ -4,9 +4,10 @@ import asyncio
 import base64
 import json
 import logging
-import re
+import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import websockets
@@ -19,6 +20,11 @@ from call_bridge.voice.provider import (
     VoiceEvent,
     VoiceSessionConfig,
 )
+from call_bridge.voice.tools import (
+    ORCHESTRATOR_TOOL_NAMES,
+    default_call_tools,
+    tools_as_openai_functions,
+)
 
 log = logging.getLogger(__name__)
 
@@ -26,105 +32,6 @@ log = logging.getLogger(__name__)
 _APPEND_CHAR_LIMIT = 1800
 _CONNECT_TIMEOUT_SECONDS = 15.0
 _CLOSE_TIMEOUT_SECONDS = 2.0
-
-# How long to wait for output transcript when Live delegates before the goodbye
-# text has arrived. Does not delay RTP; only classification of that delegation.
-DELEGATION_TRANSCRIPT_GRACE_SECONDS = 0.45
-# After an explicit "I'll hang up" (and no new user speech), emit hangup even if
-# the model never delegated. Soft closers ("bye", "take care") do not arm this.
-HANGUP_FALLBACK_SETTLE_SECONDS = 1.8
-
-# Closers used when Live already delegated. Keep these at the *end* of a turn.
-_HANGUP_MARKERS = (
-    "au revoir",
-    "raccroche",
-    "je raccroche",
-    "je vais raccrocher",
-    "je te laisse",
-    "je vous laisse",
-    "à bientôt",
-    "a bientot",
-    "goodbye",
-    "good bye",
-    "bye-bye",
-    "bye bye",
-    "bye",
-    "take care",
-    "talk soon",
-    "have a good one",
-    "have a nice day",
-    "have a good day",
-    "hanging up",
-    "hang up",
-    "i'll hang up",
-    "i will hang up",
-    "i'm hanging up",
-    "i am hanging up",
-    "i'll let you go",
-    "i will let you go",
-    "ha det bra",
-    "ha det",
-    "adjø",
-    "adjo",
-    "farvel",
-    "vi snakkes",
-    "jeg legger på",
-    "legger på",
-    "takk for nå",
-    "takk for na",
-    "ciao",
-)
-
-# Spoken intent strong enough to BYE without a second delegation.
-_EXPLICIT_HANGUP_MARKERS = (
-    "hanging up",
-    "hang up",
-    "i'll hang up",
-    "i will hang up",
-    "i'm hanging up",
-    "i am hanging up",
-    "i'm going to hang up",
-    "i am going to hang up",
-    "i'll let you go",
-    "i will let you go",
-    "je raccroche",
-    "je vais raccrocher",
-    "jeg legger på",
-    "legger på",
-)
-
-_HANGUP_NEGATIONS = (
-    "don't hang up",
-    "do not hang up",
-    "dont hang up",
-    "not hanging up",
-    "don't go",
-    "do not go",
-    "stay on the line",
-    "hold the line",
-    "hold on",
-    "one more thing",
-)
-
-_END_ONLY_HANGUP_MARKERS = (
-    "je te laisse",
-    "je vous laisse",
-    "ha det",
-)
-
-_CONTINUATION_PHRASES = (
-    "let me check",
-    "i'll check",
-    "i will check",
-    "i'll look",
-    "i will look",
-    "let me look",
-    "come back to you",
-    "i'll wait",
-    "i will wait",
-    "i forgot",
-    "before you go",
-)
 
 _LIVE_INSTRUCTION_PREFIX = """You are a calm, friendly voice agent on a live outbound phone call.
 Speak naturally, at an unhurried pace. Be clear and direct. If the callee is frustrated, acknowledge it briefly and focus on the next helpful step.
@@ -137,29 +44,31 @@ Interruption policy: Stop speaking when the callee interrupts. Listen to what th
 Silence and noise policy: Keep listening while the callee pauses to think. Do not treat a cough, hold music, a ringtone, or nearby conversation as a new request.
 
 Delegation policy:
-Backend tools:
-- ask_orchestrator: facts, decisions, and next steps the Call/orchestrator must provide. You do not have those facts. Never use this when the conversation is already finished or you are about to hang up.
-- hangup: end the phone call after you have already spoken an audible goodbye.
+A backend selects named tools. You do not call tools yourself. Where the SCRIPT says to hang up or ask the orchestrator, delegate so the backend calls that tool.
+Do not mention tools, backend, or delegation to the callee.
+- ask_orchestrator: facts, decisions, and next steps you do not have. Delegate as soon as you need them. The orchestrator is checking, and it may take a few seconds. You can let the person on the line know if you want, for example that you are looking it up. Never invent those facts. Never delegate this when the conversation is already finished or you are about to hang up.
+- hangup: end the phone call. Speak a short audible goodbye first, then delegate in the same turn so the backend calls hangup.
 
 When the goals are done, the callee says goodbye, or a fallback says to disconnect:
 1. Speak a short goodbye (for example "Thanks, take care, bye" / "Je te laisse, au revoir" / "Takk, ha det bra").
-2. Then immediately delegate hangup in the same turn. Do not ask the orchestrator what to do next. Do not wait for another user turn after you have said goodbye.
-3. If you say you will hang up, you must delegate hangup — saying "I'll hang up now" without delegating leaves the callee on the line.
+2. Then immediately delegate so the backend calls hangup. Do not ask what to do next. Do not wait for another user turn after you have said goodbye.
+3. If you say you will hang up, you must delegate in that same turn. Saying goodbye without delegating leaves the callee on the line.
 
-Voicemail: If you reach voicemail or an answering machine, leave a short message (who you are and why), say goodbye, then delegate hangup. Do not sit in silence after the greeting.
-
-Delegate to the backend when:
-- You need a fact, confirmation, or next step you do not have.
-- The conversation is complete, the callee asks to stop, or you just left a voicemail — speak goodbye first, then delegate hangup so the line can BYE.
-
-Do not delegate to the backend when:
-- You can answer from the SCRIPT, disclosure, or a still-current orchestrator result.
-- You only need a brief clarification from the callee.
-- The call is over except to hang up (use hangup, not ask_orchestrator).
+Voicemail: If you reach voicemail or an answering machine, leave a short message (who you are and why), say goodbye, then delegate so the backend calls hangup. Do not sit in silence after the greeting.
 
 Delegate before giving an answer that depends on backend work.
 Do not invent facts while waiting.
-Do not mention backend, tools, or delegation to the callee.
+"""
+
+# Stable prefix so Live can cache the backend prompt across delegations.
+LIVE_BACKEND_INSTRUCTIONS = """You select one function for a live phone call. You do not speak to the callee.
+
+If this request has no tool result yet, call exactly one function. Do not invent a function name.
+- ask_orchestrator: a fact, decision, or next step is missing. Put it in question. Do not invent the fact.
+- hangup: goodbye was already said, the callee asked to stop, or a voicemail was left. Do not use ask_orchestrator to end the call.
+
+If a tool result is already present, do not call any function. Return one short final message the voice model should say. If the result says to hang up, include a short goodbye in that message. Do not ask for confirmation.
+If the result has ok=false or error=orchestrator_timeout, the message is that fallback only. Do not invent facts.
 """
 
 
@@ -189,9 +98,14 @@ def build_live_session_payload(
     *,
     model: str,
     default_voice: str,
+    backend_model: str,
+    reasoning_effort: str,
+    service_tier: str,
+    max_output_tokens: int,
 ) -> dict[str, Any]:
-    """GPT-Live session.start body (client delegation, shared PCMA format)."""
+    """GPT-Live session.start body (responses delegation, named tools, shared PCMA format)."""
     fmt = config.audio_in
+    tools = config.tools or default_call_tools()
     return {
         "model": model,
         "instructions": compose_live_instructions(config),
@@ -199,97 +113,87 @@ def build_live_session_payload(
             "format": live_audio_format(fmt),
             "output": {"voice": config.voice or default_voice},
         },
-        "delegation": {"type": "client"},
+        "delegation": {
+            "type": "responses",
+            "responses": {
+                "model": backend_model,
+                "instructions": LIVE_BACKEND_INSTRUCTIONS.strip(),
+                "tools": tools_as_openai_functions(tools),
+                "tool_choice": "required",
+                "parallel_tool_calls": False,
+                "reasoning": {"effort": reasoning_effort},
+                "service_tier": service_tier,
+                "max_output_tokens": max_output_tokens,
+            },
+        },
     }
 
 
-def _normalize_speech(text: str) -> str:
-    lowered = (text or "").strip().lower()
-    for src in ("\u2019", "\u2018", "\u02bc", "`"):
-        lowered = lowered.replace(src, "'")
-    return " ".join(lowered.split())
+@dataclass(frozen=True, slots=True)
+class ResponsesFunctionCall:
+    """One completed function call unwrapped from a Live ``response.event``."""
+
+    name: str
+    call_id: str
+    arguments: dict[str, Any]
+    delegation_id: str | None
+    response_id: str | None
 
 
-def _closing_tail(text: str, *, max_chars: int = 180) -> str:
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    return text[-max_chars:]
+def parse_tool_arguments(raw: Any) -> dict[str, Any]:
+    """Responses sends ``arguments`` as a JSON string. Accept an object too."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {"_unparsed": text}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"_unparsed": text}
+    if raw is None:
+        return {}
+    return {"_unparsed": str(raw)}
 
 
-def _phrase_in(text: str, phrase: str) -> bool:
-    pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
-    return re.search(pattern, text) is not None
+def parse_responses_function_call(event: dict[str, Any]) -> ResponsesFunctionCall | None:
+    """Return a finished function call nested in ``response.event``.
 
-
-def _phrase_at_close(text: str, phrase: str) -> bool:
-    """True when ``phrase`` is a closer, not 'je te laisse vérifier'."""
-    match = None
-    for found in re.finditer(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text):
-        match = found
-    if not match:
-        return False
-    rest = text[match.end() :].strip(" .,!?;:…-")
-    if not rest:
-        return True
-    return any(_phrase_in(rest, marker) for marker in _HANGUP_MARKERS if marker != phrase)
-
-
-def looks_like_hangup_speech(text: str, *, explicit: bool = False) -> bool:
-    """True when the closing tail of an utterance is a hangup/goodbye.
-
-    ``explicit=True`` requires "I'll hang up" / "je raccroche" / similar — used
-    for the no-delegation fallback. Soft closers (bye, take care) only count
-    when Live already delegated, so mid-call "take care of the booking" does not
-    BYE.
+    Only ``response.output_item.done`` items of type ``function_call`` count.
+    ``response.function_call_arguments.done`` has no name or call id, so it is ignored.
     """
-    tail = _closing_tail(_normalize_speech(text))
-    if not tail:
-        return False
-    if any(_phrase_in(tail, phrase) for phrase in _CONTINUATION_PHRASES):
-        return False
-    if any(_phrase_in(tail, phrase) for phrase in _HANGUP_NEGATIONS):
-        return False
-    markers = _EXPLICIT_HANGUP_MARKERS if explicit else _HANGUP_MARKERS
-    for marker in markers:
-        if marker == "take care" and _phrase_in(tail, "take care of"):
-            continue
-        if marker in _END_ONLY_HANGUP_MARKERS and not _phrase_at_close(tail, marker):
-            continue
-        if _phrase_in(tail, marker):
-            return True
-    return False
-
-
-def classify_live_delegation(
-    *,
-    last_assistant: str,
-    recent: str,
-    last_user: str = "",
-) -> tuple[str, dict[str, Any]]:
-    """Map a client-delegation notice onto hangup or ask_orchestrator.
-
-    Live `session.delegation.created` has metadata only — no tool name or args.
-    Prefer the current assistant closer (trailing after the last user turn). If
-    that text is empty, a callee closer like "bye" still maps to hangup.
-    """
-    assistant = (last_assistant or "").strip()
-    if looks_like_hangup_speech(assistant):
-        return "hangup", {
-            "reason": "agent",
-            "summary": assistant[-240:],
-        }
-    user = (last_user or "").strip()
-    if not assistant and looks_like_hangup_speech(user):
-        return "hangup", {
-            "reason": "agent",
-            "summary": user[-240:] or (recent or "")[-240:],
-        }
-    return "ask_orchestrator", {
-        "question": "The live model delegated. What should I do or say next?",
-        "context": recent,
-        "urgency": "normal",
-    }
+    if event.get("type") != "response.event":
+        return None
+    inner = event.get("event")
+    if not isinstance(inner, dict) or inner.get("type") != "response.output_item.done":
+        return None
+    item = inner.get("item")
+    if not isinstance(item, dict):
+        item = inner.get("output_item")
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return None
+    name = item.get("name")
+    call_id = item.get("call_id")
+    if not isinstance(name, str) or not name or not isinstance(call_id, str) or not call_id:
+        return None
+    response = inner.get("response") if isinstance(inner.get("response"), dict) else {}
+    response_id = inner.get("response_id") or response.get("id") or item.get("response_id")
+    delegation_id = event.get("delegation_id")
+    if not isinstance(delegation_id, str) or not delegation_id:
+        delegation_id = None
+    if not isinstance(response_id, str) or not response_id:
+        response_id = None
+    return ResponsesFunctionCall(
+        name=name,
+        call_id=call_id,
+        arguments=parse_tool_arguments(item.get("arguments")),
+        delegation_id=delegation_id,
+        response_id=response_id,
+    )
 
 
 def _speakable_tool_output(output: dict[str, Any]) -> str:
@@ -307,6 +211,20 @@ def _clip(text: str, limit: int = _APPEND_CHAR_LIMIT) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _backend_failure_message(inner: dict[str, Any]) -> str | None:
+    """Terminal Responses events nested in ``response.event``. Empty if this is not one."""
+    kind = inner.get("type")
+    if kind == "error":
+        return _error_message(inner)
+    if kind not in {"response.failed", "response.incomplete"}:
+        return None
+    response = inner.get("response") if isinstance(inner.get("response"), dict) else inner
+    error = response.get("error") or response.get("incomplete_details") or kind
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("reason") or kind)
+    return str(error)
+
+
 def _error_message(event: dict[str, Any]) -> str:
     err = event.get("error") or event
     if isinstance(err, dict):
@@ -314,8 +232,15 @@ def _error_message(event: dict[str, Any]) -> str:
     return str(err)
 
 
+def _loop_time() -> float:
+    try:
+        return asyncio.get_running_loop().time()
+    except RuntimeError:
+        return time.monotonic()
+
+
 class OpenAILiveProvider(VoiceAgentProvider):
-    """OpenAI GPT-Live-1 WebSocket (session.start / client delegation / PCMA 8 kHz)."""
+    """OpenAI GPT-Live-1 WebSocket (responses delegation / named tools / PCMA 8 kHz)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -326,14 +251,24 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._server_closed = asyncio.Event()
         self._config: VoiceSessionConfig | None = None
         self._session_id: str | None = None
-        self._delegations: dict[str, str] = {}
-        self._fragments: list[tuple[str, str]] = []
-        self._user_speaking = False
         self._closing = False
-        self._hangup_emitted = False
-        self._fallback_task: asyncio.Task[None] | None = None
-        self._classify_tasks: set[asyncio.Task[None]] = set()
-        self._last_assistant_activity_at = 0.0
+        self._user_speaking = False
+        self._seen_call_ids: set[str] = set()
+        self._call_names: dict[str, str] = {}
+        self._pending_calls: dict[str, str] = {}
+        self._groups: dict[str, set[str]] = {}
+        self._delegation_started: dict[str, float] = {}
+        self._delegation_tool_count: dict[str, int] = {}
+        # Last orchestrator output per delegation. A later function call on that
+        # same id is settled locally so it cannot sit unanswered.
+        self._answered: dict[str, dict[str, Any]] = {}
+        self._spoken_for: set[str] = set()
+        self._checking_for: set[str] = set()
+        self._repeat_continues: dict[str, int] = {}
+        self._awaiting_final: set[str] = set()
+        self._tool_choice = "required"
+        self._failure_spoken: set[str] = set()
+        self._side_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def name(self) -> str:
@@ -345,15 +280,30 @@ class OpenAILiveProvider(VoiceAgentProvider):
         self._config = config
         self._closing = False
         self._server_closed.clear()
-        self._delegations.clear()
-        self._fragments.clear()
         self._user_speaking = False
-        self._hangup_emitted = False
-        self._last_assistant_activity_at = 0.0
-        self._cancel_classify_tasks()
-        self._disarm_hangup_fallback()
+        self._seen_call_ids.clear()
+        self._call_names.clear()
+        self._pending_calls.clear()
+        self._groups.clear()
+        self._delegation_started.clear()
+        self._delegation_tool_count.clear()
+        self._answered.clear()
+        self._spoken_for.clear()
+        self._checking_for.clear()
+        self._repeat_continues.clear()
+        self._awaiting_final.clear()
+        self._tool_choice = "required"
+        self._failure_spoken.clear()
+        for task in list(self._side_tasks):
+            task.cancel()
+        self._side_tasks.clear()
         url = self._settings.openai_live_url
-        log.info("connecting openai gpt-live %s", self._settings.openai_live_model)
+        log.info(
+            "connecting openai gpt-live %s backend=%s reasoning=%s",
+            self._settings.openai_live_model,
+            self._settings.openai_live_backend_model,
+            self._settings.openai_live_reasoning_effort,
+        )
         self._ws = await websockets.connect(
             url,
             additional_headers={
@@ -374,6 +324,10 @@ class OpenAILiveProvider(VoiceAgentProvider):
                     config,
                     model=self._settings.openai_live_model,
                     default_voice=self._settings.openai_voice,
+                    backend_model=self._settings.openai_live_backend_model,
+                    reasoning_effort=self._settings.openai_live_reasoning_effort,
+                    service_tier=self._settings.openai_live_service_tier,
+                    max_output_tokens=self._settings.openai_live_max_output_tokens,
                 ),
             }
         )
@@ -388,8 +342,8 @@ class OpenAILiveProvider(VoiceAgentProvider):
 
     async def close(self) -> None:
         self._closing = True
-        self._disarm_hangup_fallback()
-        self._cancel_classify_tasks()
+        for task in list(self._side_tasks):
+            task.cancel()
         if self._ws is not None and self._live_started() and not self._server_closed.is_set():
             try:
                 await self._send({"type": "session.close", "event_id": _event_id("close")})
@@ -429,7 +383,6 @@ class OpenAILiveProvider(VoiceAgentProvider):
         await self._append(
             "session.instructions.append",
             f"[ORCHESTRATOR STEER — do not read this aloud] {text}",
-            delegation_id=None,
         )
 
     async def speak_verbatim(self, text: str, *, interruptible: bool = False) -> None:
@@ -444,7 +397,6 @@ class OpenAILiveProvider(VoiceAgentProvider):
                 "Do not add a greeting or extra words:\n"
                 f"{text}"
             ),
-            delegation_id=None,
         )
 
     async def submit_tool_result(
@@ -456,31 +408,52 @@ class OpenAILiveProvider(VoiceAgentProvider):
     ) -> None:
         if self._ws is None:
             raise RuntimeError("voice session is not connected")
-        delegation_id = call_id if call_id in self._delegations else None
-        self._delegations.pop(call_id, None)
-        if not continue_response:
-            await self._append(
-                "session.instructions.append",
-                "The application is hanging up the call now. Do not continue the conversation.",
-                delegation_id=delegation_id,
-            )
+        group = self._pending_calls.pop(call_id, None)
+        if group is None:
+            log.warning("openai live tool result for unknown call_id=%s", call_id)
             return
-        if output.get("error") == "orchestrator_timeout" or output.get("ok") is False:
-            fallback = _speakable_tool_output(output)
-            await self._append(
-                "session.instructions.append",
-                (
-                    "The orchestrator could not complete this request. "
-                    f"{fallback} Use a SCRIPT fallback. Do not invent facts."
-                ),
-                delegation_id=delegation_id,
-            )
-            return
-        await self._append(
-            "session.commentary.append",
-            _speakable_tool_output(output),
-            delegation_id=delegation_id,
+        pending = self._groups.get(group)
+        if pending is not None:
+            pending.discard(call_id)
+            if not pending:
+                self._groups.pop(group, None)
+        name = self._call_names.get(call_id, "")
+        if continue_response and name in ORCHESTRATOR_TOOL_NAMES:
+            # Remember before any await so a repeat on this delegation cannot
+            # open another orchestrator wait.
+            self._answered[group] = output
+            if group not in self._spoken_for:
+                self._spoken_for.add(group)
+                await self._append(
+                    "session.commentary.append",
+                    (
+                        "Tell the callee the following now, in their language, then pause and listen. "
+                        "Do not mention tools:\n"
+                        f"{_speakable_tool_output(output)}"
+                    ),
+                )
+            # tool_choice stays "required" on the session so the next delegation
+            # still picks a named tool. This continuation must be a final message,
+            # otherwise the backend calls ask_orchestrator again and Live stays silent.
+            await self._set_tool_choice("none")
+        await self._send(
+            {
+                "type": "response.item.create",
+                "event_id": _event_id("tool"),
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(output, ensure_ascii=False),
+                },
+            }
         )
+        # Hangup must not start another backend turn (that can talk over the goodbye).
+        # Other still-open calls on this delegation keep the response parked.
+        group_open = bool(self._groups.get(group))
+        if not continue_response or group_open:
+            return
+        self._awaiting_final.add(group)
+        await self._send({"type": "response.create", "event_id": _event_id("cont")})
 
     async def events(self) -> AsyncIterator[VoiceEvent]:
         while True:
@@ -489,12 +462,44 @@ class OpenAILiveProvider(VoiceAgentProvider):
             if event.type == "closed":
                 return
 
-    async def _append(self, type_: str, content: str, *, delegation_id: str | None) -> None:
+    async def _set_tool_choice(self, choice: str) -> None:
+        if self._ws is None or self._tool_choice == choice:
+            return
+        self._tool_choice = choice
+        log.info("openai live backend tool_choice=%s", choice)
+        await self._send(
+            {
+                "type": "session.update",
+                "event_id": _event_id("upd"),
+                "session": {
+                    "delegation": {
+                        "responses": {"tool_choice": choice},
+                    },
+                },
+            }
+        )
+
+    def _spawn(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._side_tasks.add(task)
+        task.add_done_callback(self._side_done)
+
+    def _side_done(self, task: asyncio.Task[None]) -> None:
+        self._side_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("openai live side task failed: %s", exc)
+
+    async def _append(self, type_: str, content: str) -> None:
+        # Responses-mode updates use a null delegation id. A client delegation id
+        # is rejected on this session.
         await self._send(
             {
                 "type": type_,
                 "event_id": _event_id("append"),
-                "delegation_id": delegation_id,
+                "delegation_id": None,
                 "content": _clip(content),
             }
         )
@@ -534,92 +539,36 @@ class OpenAILiveProvider(VoiceAgentProvider):
         if self._ready is not None and not self._ready.done():
             self._ready.set_exception(exc)
 
-    def _recent_conversation(self, *, max_chars: int = 800) -> str:
-        lines: list[str] = []
-        for role, text in self._fragments[-24:]:
-            piece = text.strip()
-            if piece:
-                lines.append(f"{role}: {piece}")
-        blob = "\n".join(lines)
-        if len(blob) > max_chars:
-            return blob[-max_chars:]
-        return blob
-
-    def _trailing_role_text(self, role: str) -> str:
-        """Text for ``role`` only if that role is currently speaking (no later other-role turn)."""
-        chunks: list[str] = []
-        for frag_role, text in reversed(self._fragments):
-            if not (text or "").strip():
-                continue
-            if frag_role != role:
-                break
-            chunks.append(text)
-        chunks.reverse()
-        return "".join(chunks)
-
-    def _mark_assistant_activity(self) -> None:
-        try:
-            self._last_assistant_activity_at = asyncio.get_running_loop().time()
-        except RuntimeError:
-            self._last_assistant_activity_at = 0.0
-
-    def _cancel_classify_tasks(self) -> None:
-        for task in list(self._classify_tasks):
-            task.cancel()
-        self._classify_tasks.clear()
-
-    def _disarm_hangup_fallback(self) -> None:
-        task = self._fallback_task
-        self._fallback_task = None
-        if task is not None and not task.done():
-            task.cancel()
-
-    def _arm_hangup_fallback(self) -> None:
-        if self._hangup_emitted or self._closing:
+    def _note_delegation(self, event: dict[str, Any]) -> None:
+        """Record when Live handed work to the backend. Does not choose a tool."""
+        delegation = event.get("delegation") if isinstance(event.get("delegation"), dict) else {}
+        delegation_id = delegation.get("id") or event.get("delegation_id")
+        if not isinstance(delegation_id, str) or not delegation_id:
+            log.warning("openai live delegation missing id: %s", event.get("type"))
             return
-        self._disarm_hangup_fallback()
-        try:
-            self._fallback_task = asyncio.get_running_loop().create_task(
-                self._hangup_fallback_watch(),
-                name="openai-hangup-fallback",
+        target = delegation.get("target") or event.get("target") or "responses"
+        response_id = delegation.get("response_id") or event.get("response_id")
+        if delegation_id not in self._delegation_started:
+            self._delegation_started[delegation_id] = _loop_time()
+            self._delegation_tool_count.setdefault(delegation_id, 0)
+            log.info(
+                "openai live delegation id=%s target=%s response_id=%s",
+                delegation_id,
+                target,
+                response_id or "",
             )
-        except RuntimeError:
-            self._fallback_task = None
 
-    def _track_task(self, task: asyncio.Task[None]) -> None:
-        self._classify_tasks.add(task)
-        task.add_done_callback(self._classify_tasks.discard)
+    def _delegation_ms(self, delegation_id: str | None) -> str:
+        if not delegation_id:
+            return "na"
+        started = self._delegation_started.get(delegation_id)
+        if started is None:
+            return "na"
+        return f"{(_loop_time() - started) * 1000:.0f}"
 
-    def _on_assistant_speech(self, text: str) -> None:
-        self._mark_assistant_activity()
-        if not text:
-            return
-        trailing = self._trailing_role_text("assistant")
-        if looks_like_hangup_speech(trailing, explicit=True):
-            self._arm_hangup_fallback()
-        elif not looks_like_hangup_speech(trailing):
-            self._disarm_hangup_fallback()
-
-    async def _note_transcript(self, role: str, text: str) -> None:
-        if text:
-            self._fragments.append((role, text))
-        if role == "assistant":
-            self._on_assistant_speech(text)
-        else:
-            self._disarm_hangup_fallback()
-        await self._events.put(
-            VoiceEvent(
-                type="transcript",
-                payload={"role": role, "text": text, "final": False},
-            )
-        )
-
-    async def _emit_tool_call(self, tool: str, tool_call_id: str, arguments: dict[str, Any]) -> None:
-        self._delegations[tool_call_id] = tool
-        if tool == "hangup":
-            self._hangup_emitted = True
-            self._disarm_hangup_fallback()
-        log.info("openai live tool %s id=%s", tool, tool_call_id)
+    async def _emit_tool_call(
+        self, tool: str, tool_call_id: str, arguments: dict[str, Any]
+    ) -> None:
         await self._events.put(
             VoiceEvent(
                 type="tool_call",
@@ -631,51 +580,139 @@ class OpenAILiveProvider(VoiceAgentProvider):
             )
         )
 
-    async def _classify_and_emit_delegation(self, delegation_id: str, *, wait_for_transcript: bool) -> None:
-        if wait_for_transcript:
-            deadline = asyncio.get_running_loop().time() + DELEGATION_TRANSCRIPT_GRACE_SECONDS
-            while asyncio.get_running_loop().time() < deadline:
-                if self._trailing_role_text("assistant") or self._trailing_role_text("user"):
-                    break
-                await asyncio.sleep(0.05)
-        if self._hangup_emitted or self._closing:
+    async def _handle_response_event(self, event: dict[str, Any]) -> None:
+        """Unwrap one backend event. Never waits on the orchestrator or on audio."""
+        call = parse_responses_function_call(event)
+        if call is not None:
+            await self._emit_function_call(call)
             return
-        assistant = self._trailing_role_text("assistant")
-        user = self._trailing_role_text("user")
-        tool, arguments = classify_live_delegation(
-            last_assistant=assistant,
-            last_user=user,
-            recent=self._recent_conversation(),
+        inner = event.get("event")
+        if not isinstance(inner, dict):
+            return
+        failure = _backend_failure_message(inner)
+        if failure:
+            delegation_id = event.get("delegation_id")
+            if not isinstance(delegation_id, str):
+                delegation_id = None
+            log.warning(
+                "openai live backend failure delegation_id=%s message=%s",
+                delegation_id or "",
+                failure,
+            )
+            await self._events.put(VoiceEvent(type="error", payload={"message": failure}))
+            key = delegation_id or ""
+            if self._ws is not None and key not in self._failure_spoken:
+                self._failure_spoken.add(key)
+                self._spawn(self._say_backend_failure())
+            if self._tool_choice == "none":
+                self._spawn(self._set_tool_choice("required"))
+            return
+        if inner.get("type") != "response.completed":
+            return
+        delegation_id = event.get("delegation_id")
+        if not isinstance(delegation_id, str):
+            delegation_id = None
+        if delegation_id and delegation_id in self._awaiting_final:
+            self._awaiting_final.discard(delegation_id)
+            # Next delegation must be able to call a named tool again.
+            self._spawn(self._set_tool_choice("required"))
+            return
+        count = self._delegation_tool_count.get(delegation_id or "", 0)
+        if count == 0:
+            log.warning(
+                "openai live delegation id=%s completed with no function call delegation_ms=%s",
+                delegation_id or "",
+                self._delegation_ms(delegation_id),
+            )
+
+    def _remember_call(self, call: ResponsesFunctionCall) -> str:
+        group = call.delegation_id or call.response_id or call.call_id
+        self._call_names[call.call_id] = call.name
+        self._pending_calls[call.call_id] = group
+        self._groups.setdefault(group, set()).add(call.call_id)
+        if call.delegation_id:
+            self._delegation_tool_count[call.delegation_id] = (
+                self._delegation_tool_count.get(call.delegation_id, 0) + 1
+            )
+        return group
+
+    async def _say_backend_failure(self) -> None:
+        await self._append(
+            "session.commentary.append",
+            (
+                "Say one short sentence that you could not check that just now, "
+                "then use a SCRIPT fallback. Do not invent the fact."
+            ),
         )
-        await self._emit_tool_call(tool, delegation_id, arguments)
 
-    async def _hangup_fallback_watch(self) -> None:
-        """BYE after explicit hangup speech when Live never delegates.
-
-        Armed only on "I'll hang up" / "je raccroche" / similar — not on "bye"
-        or "take care", which are common mid-call. Cancelled on user barge-in.
-        """
-        try:
-            while True:
-                await asyncio.sleep(0.05)
-                if self._hangup_emitted or self._closing or self._user_speaking:
-                    return
-                last = self._trailing_role_text("assistant")
-                if not looks_like_hangup_speech(last, explicit=True):
-                    return
-                idle = asyncio.get_running_loop().time() - self._last_assistant_activity_at
-                if idle >= HANGUP_FALLBACK_SETTLE_SECONDS:
-                    await self._emit_tool_call(
-                        "hangup",
-                        f"hangup_fallback_{uuid.uuid4().hex[:12]}",
-                        {
-                            "reason": "spoken_goodbye",
-                            "summary": last[-240:],
-                        },
-                    )
-                    return
-        except asyncio.CancelledError:
+    async def _say_checking(self, delegation_id: str | None) -> None:
+        key = delegation_id or ""
+        if key in self._checking_for or self._ws is None:
             return
+        self._checking_for.add(key)
+        await self._append(
+            "session.commentary.append",
+            (
+                "The orchestrator is checking this. It may take a few seconds. "
+                "You can let the person on the line know if you want, for example that you are looking it up. "
+                "Do not invent the fact."
+            ),
+        )
+
+    async def _settle_repeat(self, call: ResponsesFunctionCall, group: str) -> None:
+        """Answer a second function call on a delegation that already has a result."""
+        previous = self._answered.get(group) or {}
+        speakable = _speakable_tool_output(previous)
+        output = {
+            "ok": True,
+            "already_answered": True,
+            "answer": speakable,
+            "instruction": (
+                "Already answered on this delegation. Speak that answer to the callee now. "
+                "Do not call a tool and do not ask for confirmation."
+            ),
+        }
+        # One continuation after the repeat, with tools disabled. Further calls
+        # only receive the output so the backend cannot loop on the orchestrator.
+        repeats = self._repeat_continues.get(group, 0)
+        self._repeat_continues[group] = repeats + 1
+        log.info(
+            "openai live repeat %s call_id=%s delegation_id=%s settled locally",
+            call.name,
+            call.call_id,
+            group,
+        )
+        await self.submit_tool_result(
+            call.call_id,
+            output,
+            continue_response=repeats == 0,
+        )
+
+    async def _emit_function_call(self, call: ResponsesFunctionCall) -> None:
+        if call.call_id in self._seen_call_ids:
+            log.info("openai live duplicate function call call_id=%s", call.call_id)
+            return
+        self._seen_call_ids.add(call.call_id)
+        group = call.delegation_id or call.response_id or call.call_id
+        if (
+            call.name in ORCHESTRATOR_TOOL_NAMES
+            and group in self._answered
+        ):
+            self._remember_call(call)
+            self._spawn(self._settle_repeat(call, group))
+            return
+        self._remember_call(call)
+        delay_ms = self._delegation_ms(call.delegation_id)
+        log.info(
+            "openai live tool %s call_id=%s delegation_id=%s delegation_ms=%s",
+            call.name,
+            call.call_id,
+            call.delegation_id or "",
+            delay_ms,
+        )
+        if call.name in ORCHESTRATOR_TOOL_NAMES and self._ws is not None:
+            self._spawn(self._say_checking(call.delegation_id))
+        await self._emit_tool_call(call.name, call.call_id, call.arguments)
 
     async def _handle_server_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type", "")
@@ -694,7 +731,6 @@ class OpenAILiveProvider(VoiceAgentProvider):
             delta = event.get("delta") or event.get("audio")
             if delta:
                 self._user_speaking = False
-                self._mark_assistant_activity()
                 await self._events.put(
                     VoiceEvent(type="audio.out", payload={"pcm": base64.b64decode(delta)})
                 )
@@ -705,33 +741,28 @@ class OpenAILiveProvider(VoiceAgentProvider):
                 self._user_speaking = True
                 # Flush queued assistant playout on barge-in (Live has no speech.started).
                 await self._events.put(VoiceEvent(type="speech.started", payload=event))
-            await self._note_transcript("user", text)
+            await self._events.put(
+                VoiceEvent(
+                    type="transcript",
+                    payload={"role": "user", "text": text, "final": False},
+                )
+            )
             return
         if kind == "session.output_transcript.delta":
             self._user_speaking = False
             text = event.get("delta") or event.get("text") or ""
-            await self._note_transcript("assistant", text)
+            await self._events.put(
+                VoiceEvent(
+                    type="transcript",
+                    payload={"role": "assistant", "text": text, "final": False},
+                )
+            )
             return
         if kind == "session.delegation.created":
-            delegation = event.get("delegation") or {}
-            delegation_id = delegation.get("id") or event.get("delegation_id")
-            if not delegation_id:
-                log.warning("openai live delegation missing id: %s", event)
-                return
-            assistant = self._trailing_role_text("assistant")
-            user = self._trailing_role_text("user")
-            # If goodbye audio/transcript is still in flight, wait off the read
-            # loop so later output_transcript.delta events can arrive.
-            wait = not assistant and not user
-            if wait:
-                self._track_task(
-                    asyncio.create_task(
-                        self._classify_and_emit_delegation(delegation_id, wait_for_transcript=True),
-                        name="openai-classify-delegation",
-                    )
-                )
-                return
-            await self._classify_and_emit_delegation(delegation_id, wait_for_transcript=False)
+            self._note_delegation(event)
+            return
+        if kind == "response.event":
+            await self._handle_response_event(event)
             return
         if kind == "error":
             message = _error_message(event)

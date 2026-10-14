@@ -181,6 +181,71 @@ async def test_idle_timeout_disabled_when_zero():
 
 
 @pytest.mark.asyncio
+async def test_spoken_goodbye_stays_up_until_orchestrator_hangup():
+    """The bridge does not hang up from words. The Call bot forces BYE over HTTP."""
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="transcript",
+                payload={
+                    "role": "assistant",
+                    "text": "Bye, I'll hang up now.",
+                    "final": True,
+                },
+            )
+        )
+        await asyncio.sleep(0.3)
+        assert record.state == "bridged"
+        transcripts = [
+            event
+            for event in manager.bus.history(record.id)
+            if event.type == "transcript" and event.payload.get("text")
+        ]
+        assert transcripts
+        await manager.hangup(record.id, reason="orchestrator")
+        await _wait_record(record, states={"ended", "failed"}, timeout=3.0)
+        assert record.state == "ended"
+        assert record.hangup_reason == "orchestrator"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_hangup_tool_plays_trailing_audio_before_bye():
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
+    sent: list[bytes] = []
+    original = manager.sip.send_audio
+
+    async def capture(call_id: str, frame: bytes) -> None:
+        sent.append(frame)
+        await original(call_id, frame)
+
+    manager.sip.send_audio = capture  # type: ignore[method-assign]
+    marker = bytes([0x2A]) * 160
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "hangup",
+                    "tool_call_id": "h-audio",
+                    "arguments": {"reason": "completed", "summary": "goodbye"},
+                },
+            )
+        )
+        voice.push(VoiceEvent(type="audio.out", payload={"pcm": marker * 4}))
+        await _wait_record(record, states={"ended", "failed"}, timeout=6.0)
+        assert record.state == "ended"
+        assert record.hangup_reason == "completed"
+        assert marker in sent
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
 async def test_hangup_tool_call_ends_sip_call():
     manager, _script, voice, record = await _start_quiet_call(idle_seconds=0)
     try:

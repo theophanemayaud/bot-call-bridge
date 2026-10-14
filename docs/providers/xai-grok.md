@@ -40,6 +40,6 @@ Planning tips:
 | Prefer Grok when… | Prefer OpenAI when… |
 |---|---|
 | You already have xAI Voice credits / Grok tooling | You want published GPT-Live $/min pricing |
-| You want Realtime function tools (`session.update`) | You want full-duplex Live + client delegation |
+| You want Realtime function tools (`session.update`) | You want full-duplex Live + named `hangup` / `ask_orchestrator` tools |
 
 Switch with `VOICE_PROVIDER=` only — no code change.

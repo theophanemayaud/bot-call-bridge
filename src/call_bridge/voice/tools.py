@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from call_bridge.voice.provider import ToolSpec
 
 HANGUP_TOOL = ToolSpec(
@@ -58,6 +60,24 @@ ASK_ORCHESTRATOR_TOOL = ToolSpec(
 
 def default_call_tools() -> list[ToolSpec]:
     return [HANGUP_TOOL, ASK_ORCHESTRATOR_TOOL]
+
+
+# Local tools run in this process (hangup → SIP BYE after queued goodbye audio).
+# dial_digits (DTMF) would be added here: a ToolSpec in default_call_tools(), the
+# name in this set, and a branch in the session dispatcher. Do not route it to
+# the orchestrator.
+LOCAL_TOOL_NAMES = frozenset({"hangup"})
+
+# The Call orchestrator answers these on the events WebSocket via /tool-results.
+ORCHESTRATOR_TOOL_NAMES = frozenset({"ask_orchestrator"})
+
+
+def tool_route(name: str) -> Literal["local", "orchestrator", "unknown"]:
+    if name in LOCAL_TOOL_NAMES:
+        return "local"
+    if name in ORCHESTRATOR_TOOL_NAMES:
+        return "orchestrator"
+    return "unknown"
 
 
 def tools_as_openai_functions(tools: list[ToolSpec]) -> list[dict]:
