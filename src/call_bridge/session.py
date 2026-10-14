@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -14,7 +15,7 @@ from call_bridge.sip.endpoint import SipEndpoint
 from call_bridge.sip.protocol import PCMA_FRAME_BYTES, PCMA_SILENCE
 from call_bridge.voice.factory import create_voice_provider
 from call_bridge.voice.provider import VoiceAgentProvider, VoiceEvent, VoiceSessionConfig
-from call_bridge.voice.tools import default_call_tools
+from call_bridge.voice.tools import default_call_tools, tool_route
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +193,7 @@ class _LiveCall:
         self._play_buf = bytearray()
         self._last_activity = time.monotonic()
         self._orchestrator_tasks: set[asyncio.Task[None]] = set()
+        self._hangup_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         record = self.record
@@ -377,18 +379,42 @@ class _LiveCall:
             task.cancel()
 
     async def _dispatch_tool_call(self, payload: dict[str, Any]) -> None:
-        """Hangup must not wait behind ask_orchestrator (Live can emit both)."""
-        tool = payload.get("tool")
+        """Route named tools. Hangup must not block the audio consumer or an orchestrator wait.
+
+        A future local tool such as dial_digits (DTMF) belongs in this function,
+        next to hangup, so it runs here instead of going to the orchestrator.
+        """
+        tool = str(payload.get("tool") or "")
         if tool == "hangup":
+            if self._hangup.is_set() or (
+                self._hangup_task is not None and not self._hangup_task.done()
+            ):
+                return
             self._cancel_pending_orchestrator()
-            await self._on_tool_call(payload)
+            self._hangup_task = asyncio.create_task(
+                self._run_hangup_tool(payload),
+                name="hangup-tool",
+            )
             return
-        if tool == "ask_orchestrator":
+        if tool_route(tool) == "orchestrator":
             task = asyncio.create_task(self._on_tool_call(payload), name="ask-orchestrator")
             self._orchestrator_tasks.add(task)
             task.add_done_callback(self._orchestrator_tasks.discard)
             return
         await self._on_tool_call(payload)
+
+    async def _run_hangup_tool(self, payload: dict[str, Any]) -> None:
+        try:
+            await self._on_tool_call(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("hangup tool failed for call %s", self.record.id)
+            if not self._hangup.is_set():
+                arguments = payload.get("arguments") or {}
+                self._hangup_reason = str(arguments.get("reason") or "agent")
+                self.record.hangup_reason = self._hangup_reason
+                self._hangup.set()
 
     async def _on_tool_call(self, payload: dict[str, Any]) -> None:
         tool = payload.get("tool")
@@ -408,25 +434,23 @@ class _LiveCall:
                 continue_response=False,
             )
             # Let any in-flight goodbye TTS reach the RTP playout (plus configured grace).
+            # This runs off the voice-event consumer so transcripts keep flowing.
             grace = float(self.manager.settings.hangup_grace_seconds)
-            deadline = asyncio.get_running_loop().time() + max(grace, 2.5)
-            while asyncio.get_running_loop().time() < deadline:
-                if self._downlink.empty() and len(self._play_buf) < PCMA_FRAME_BYTES:
-                    # small settle so the last frame is sent
-                    await asyncio.sleep(0.15)
-                    if self._downlink.empty() and len(self._play_buf) < PCMA_FRAME_BYTES:
-                        break
-                await asyncio.sleep(0.05)
+            await self._await_queued_audio(cap_seconds=max(grace, 2.5), settle_seconds=0.15)
             await asyncio.sleep(grace)
             self._hangup_reason = str(arguments.get("reason") or "agent")
             self.record.hangup_reason = self._hangup_reason
             self._hangup.set()
             return
-        if tool == "ask_orchestrator":
+        if tool_route(tool) == "orchestrator":
             pending = PendingTool(tool=tool, tool_call_id=tool_call_id, arguments=arguments)
             self.record.pending_tools[tool_call_id] = pending
             self.record.state = "waiting_orchestrator"
             self.manager._emit(self.record, "call.state", {"state": "waiting_orchestrator"})
+            checking = asyncio.create_task(
+                self._offer_checking(pending),
+                name="orchestrator-checking",
+            )
             try:
                 result = await asyncio.wait_for(
                     pending.future, timeout=self.manager.settings.tool_timeout_seconds
@@ -440,6 +464,11 @@ class _LiveCall:
             except asyncio.CancelledError:
                 self.record.pending_tools.pop(tool_call_id, None)
                 return
+            finally:
+                if not checking.done():
+                    checking.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await checking
             self.record.pending_tools.pop(tool_call_id, None)
             if self._hangup.is_set():
                 return
@@ -453,9 +482,45 @@ class _LiveCall:
             continue_response=True,
         )
 
+    async def _offer_checking(self, pending: PendingTool) -> None:
+        """One soft context turn after audio already queued for this response.
+
+        Not a playout buffer on the happy path. Cancelled when the answer arrives first.
+        """
+        try:
+            if pending.future.done() or self._hangup.is_set():
+                return
+            await self._await_queued_audio(cap_seconds=2.0, settle_seconds=0.05)
+            if pending.future.done() or self._hangup.is_set():
+                return
+            await self.provider.offer_checking_context(pending.tool_call_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("checking context failed for call %s", self.record.id)
+
+    async def _await_queued_audio(
+        self, *, cap_seconds: float, settle_seconds: float = 0.05
+    ) -> None:
+        """Wait until audio already queued for RTP has been sent, or until cap_seconds."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cap_seconds
+        while loop.time() < deadline:
+            if self._downlink.empty() and len(self._play_buf) < PCMA_FRAME_BYTES:
+                await asyncio.sleep(settle_seconds)
+                if self._downlink.empty() and len(self._play_buf) < PCMA_FRAME_BYTES:
+                    return
+            else:
+                await asyncio.sleep(0.05)
+
     async def _teardown(self) -> None:
         reason = self._hangup_reason
         self._cancel_pending_orchestrator()
+        hangup_task = self._hangup_task
+        if hangup_task is not None and not hangup_task.done():
+            hangup_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await hangup_task
         try:
             await self.manager.sip.hangup(self.record.id, reason=reason)
         except Exception as exc:

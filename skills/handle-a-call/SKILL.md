@@ -51,7 +51,9 @@ Watch `call.state`: `dialing` → `ringing` / `bridged`. `failed` + `voice.error
 | Timeout risk | If you cannot answer, the bridge injects “use fallback, do not invent” |
 | Need a silent steer | `POST …/guidelines` `{ "text": "Wrap up.", "mode": "steer" }` |
 | Need a spoken line | `{ "mode": "speak" }` (Grok `force_message`) |
-| `tool_call` `hangup` | Bridge BYEs after goodbye grace — report the `summary` / `reason` (Live may classify a goodbye delegation as hangup, or fall back after "I'll hang up") |
+| `tool_call` `hangup` | Bridge BYEs after queued goodbye audio and grace — report the `summary` / `reason`. On Grok this fires only when the model calls the named tool |
+| Goodbye in the Grok transcript, no `hangup` tool | `POST …/hangup`. The Grok path does not hang up from spoken words |
+| `tool_call` `ask_orchestrator` in flight | Grok already gave the model soft context (checking, a few seconds, it may tell the person). Do not force a scripted holding line for that wait |
 | You decide to stop | `POST …/hangup` `{ "reason": "orchestrator" }` |
 | Voicemail | SCRIPT + Live prompts: short message (who + why), goodbye, hang up. Do not wait in silence |
 | Idle (`idle_timeout`) | Bridge BYEs after `CALL_IDLE_TIMEOUT_SECONDS` (default 30) with no user/assistant speech. Comfort-noise RTP does not count. `0` disables |
@@ -72,7 +74,7 @@ Each `answer` is one short, speakable instruction:
 |---|---|
 | Fact you have | Just that fact + next step. Not the whole brief |
 | Request to note / do something | Confirm it is noted (or done) + say it aloud + next step |
-| Needs real work or time | Reply **immediately** with a holding line (`Say you're checking, keep them on the line.`), do the work, then `POST …/guidelines` `{ "mode": "speak" }` with the result |
+| Needs real work or time | Reply **immediately** with the outcome you have, or a short note that you are still checking (your own words). The Grok bridge already told the model it may say so. Then `POST …/guidelines` `{ "mode": "speak" }` with the result |
 | Unknown / out of scope | Say so briefly (`I don't have that; offer to follow up.`). Do not invent |
 | Callee is wrapping up / said goodbye | Short confirmation + `Say goodbye and hang up.` Do not ask open questions or reopen the conversation |
 

@@ -19,7 +19,7 @@ from call_bridge.voice.openai import (
     looks_like_hangup_speech,
 )
 from call_bridge.voice.provider import AudioFormat, VoiceAgentProvider, VoiceSessionConfig
-from call_bridge.voice.tools import default_call_tools, tools_as_openai_functions
+from call_bridge.voice.tools import default_call_tools, tool_route, tools_as_openai_functions
 
 
 def test_factory_mock_and_grok():
@@ -439,6 +439,11 @@ def test_shared_function_tool_shape():
     names = {item["name"] for item in encoded}
     assert names == {"hangup", "ask_orchestrator"}
     assert all(item["type"] == "function" for item in encoded)
+    ask = next(item for item in encoded if item["name"] == "ask_orchestrator")
+    assert ask["parameters"]["required"] == ["question"]
+    assert tool_route("hangup") == "local"
+    assert tool_route("ask_orchestrator") == "orchestrator"
+    assert tool_route("dial_digits") == "unknown"
 
 
 @pytest.mark.asyncio
