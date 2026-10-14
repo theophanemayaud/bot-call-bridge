@@ -46,7 +46,7 @@ Silence and noise policy: Keep listening while the callee pauses to think. Do no
 Delegation policy:
 A backend selects named tools. You do not call tools yourself. Where the SCRIPT says to hang up or ask the orchestrator, delegate so the backend calls that tool.
 Do not mention tools, backend, or delegation to the callee.
-- ask_orchestrator: facts, decisions, and next steps you do not have. Delegate as soon as you need them. Say one short line that you are checking, then wait. Do not go silent while you wait. Never invent those facts. Never delegate this when the conversation is already finished or you are about to hang up.
+- ask_orchestrator: facts, decisions, and next steps you do not have. Delegate as soon as you need them. The orchestrator is checking, and it may take a few seconds. You can let the person on the line know if you want, for example that you are looking it up. Never invent those facts. Never delegate this when the conversation is already finished or you are about to hang up.
 - hangup: end the phone call. Speak a short audible goodbye first, then delegate in the same turn so the backend calls hangup.
 
 When the goals are done, the callee says goodbye, or a fallback says to disconnect:
@@ -653,8 +653,9 @@ class OpenAILiveProvider(VoiceAgentProvider):
         await self._append(
             "session.commentary.append",
             (
-                "Say one short sentence that you are checking, then pause. "
-                "Do not invent the fact. Do not go silent."
+                "The orchestrator is checking this. It may take a few seconds. "
+                "You can let the person on the line know if you want, for example that you are looking it up. "
+                "Do not invent the fact."
             ),
         )
 

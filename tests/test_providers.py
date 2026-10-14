@@ -156,7 +156,9 @@ def test_compose_live_instructions_keeps_policy_labels():
     assert "Do not sit in silence after the greeting." in text
     assert "Never delegate this when the conversation is already finished" in text
     assert "immediately delegate so the backend calls hangup" in text
-    assert "Do not go silent while you wait." in text
+    assert "may take a few seconds" in text
+    assert "if you want" in text
+    assert "Do not go silent" not in text
     assert "do not call any function" in LIVE_BACKEND_INSTRUCTIONS.lower()
     assert "do not ask for confirmation" in LIVE_BACKEND_INSTRUCTIONS.lower()
 
@@ -576,6 +578,8 @@ async def test_answered_delegation_is_spoken_and_repeat_is_not_forwarded():
     ]
     assert len(checking) == 1
     assert checking[0]["delegation_id"] is None
+    assert "may take a few seconds" in checking[0]["content"]
+    assert "Say one short sentence" not in checking[0]["content"]
 
     sent.clear()
     await provider.submit_tool_result(

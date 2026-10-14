@@ -45,7 +45,7 @@ Session start sets:
 
 `session.delegation.created` is only a timer mark (`target: "responses"`, no tool name). The call arrives later as `response.event` → `response.output_item.done` with a `function_call` item (`call_id`, `name`, `arguments`). An arguments-done event is ignored.
 
-`tool_choice` starts as `required`, so a delegation becomes a named tool. Leaving it required after the result makes the backend call `ask_orchestrator` again (a confirmation) instead of a final message, and Live never speaks the answer. Before `response.create`, the bridge sets `tool_choice` to `none`. Another `ask_orchestrator` on a delegation that already has a result is answered locally with that result. It is not sent to the orchestrator. A checking line is spoken when the orchestrator call opens, so the wait is not silence. That line is one commentary event, not a playout buffer.
+`tool_choice` starts as `required`, so a delegation becomes a named tool. Leaving it required after the result makes the backend call `ask_orchestrator` again (a confirmation) instead of a final message, and Live never speaks the answer. Before `response.create`, the bridge sets `tool_choice` to `none`. Another `ask_orchestrator` on a delegation that already has a result is answered locally with that result. It is not sent to the orchestrator. When the orchestrator call opens, one commentary gives Live the context that the orchestrator is checking and that it may take a few seconds, and that Live can let the callee know if it wants. It does not prescribe the words. That is one commentary event, not a playout buffer.
 
 | Tool | Who runs it |
 |---|---|
