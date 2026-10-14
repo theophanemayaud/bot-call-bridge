@@ -168,26 +168,24 @@ async def test_grok_function_call_is_a_tool_and_goodbye_text_is_not():
 
 
 @pytest.mark.asyncio
-async def test_grok_checking_context_is_not_forced_speech():
+async def test_grok_checking_context_is_one_response_not_history():
     provider = GrokVoiceProvider(Settings(xai_api_key="test-key"))
     socket = _FakeSocket()
     provider._ws = socket
     await provider.offer_checking_context("call_9")
-    assert [item["type"] for item in socket.sent] == [
-        "conversation.item.create",
-        "response.create",
-    ]
-    item = socket.sent[0]["item"]
-    assert item["type"] == "message"
-    assert item["role"] == "system"
-    assert item["content"][0]["text"] == ORCHESTRATOR_CHECKING_CONTEXT
+    await provider.offer_checking_context("call_other")
+    assert [item["type"] for item in socket.sent] == ["response.create"]
+    assert socket.sent[0]["response"]["instructions"] == ORCHESTRATOR_CHECKING_CONTEXT
     assert "force_message" not in json.dumps(socket.sent)
-    assert socket.sent[1]["response"]["instructions"] == ORCHESTRATOR_CHECKING_CONTEXT
+    assert "conversation.item.create" not in json.dumps(socket.sent)
 
-    socket.sent.clear()
+    await provider._handle_server_event({"type": "response.done"})
     provider._settled_calls.add("call_9")
+    socket.sent.clear()
     await provider.offer_checking_context("call_9")
     assert socket.sent == []
+    await provider.offer_checking_context("call_later")
+    assert [item["type"] for item in socket.sent] == ["response.create"]
 
 
 @pytest.mark.asyncio

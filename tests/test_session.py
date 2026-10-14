@@ -290,10 +290,46 @@ async def test_ask_orchestrator_offers_soft_context_without_blocking_transcript(
             if voice.checking and "Tuesday or Thursday?" in texts:
                 break
             await asyncio.sleep(0.02)
-        assert voice.checking == ["orch-live"]
+        assert len(voice.checking) == 1
         assert record.state == "waiting_orchestrator"
         tools = [event for event in manager.bus.history(record.id) if event.type == "tool_call"]
         assert tools[-1].payload["arguments"]["question"] == "Which slot?"
+    finally:
+        if record.state not in {"ended", "failed"}:
+            await manager.hangup(record.id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_parallel_asks_share_one_checking_turn():
+    voice = _RecordingVoice()
+    manager, _script, voice, record = await _start_quiet_call(idle_seconds=0, voice=voice)
+    try:
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch-a",
+                    "arguments": {"question": "Which day?"},
+                },
+            )
+        )
+        voice.push(
+            VoiceEvent(
+                type="tool_call",
+                payload={
+                    "tool": "ask_orchestrator",
+                    "tool_call_id": "orch-b",
+                    "arguments": {"question": "Which time?"},
+                },
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline and not voice.checking:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
+        assert voice.checking == [None]
+        assert set(record.pending_tools) == {"orch-a", "orch-b"}
     finally:
         if record.state not in {"ended", "failed"}:
             await manager.hangup(record.id, reason="cleanup")

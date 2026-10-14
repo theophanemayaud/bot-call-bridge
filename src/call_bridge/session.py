@@ -194,6 +194,7 @@ class _LiveCall:
         self._last_activity = time.monotonic()
         self._orchestrator_tasks: set[asyncio.Task[None]] = set()
         self._hangup_task: asyncio.Task[None] | None = None
+        self._checking_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         record = self.record
@@ -377,6 +378,9 @@ class _LiveCall:
                 pending.future.cancel()
         for task in list(self._orchestrator_tasks):
             task.cancel()
+        checking = self._checking_task
+        if checking is not None and not checking.done():
+            checking.cancel()
 
     async def _dispatch_tool_call(self, payload: dict[str, Any]) -> None:
         """Route named tools. Hangup must not block the audio consumer or an orchestrator wait.
@@ -447,10 +451,11 @@ class _LiveCall:
             self.record.pending_tools[tool_call_id] = pending
             self.record.state = "waiting_orchestrator"
             self.manager._emit(self.record, "call.state", {"state": "waiting_orchestrator"})
-            checking = asyncio.create_task(
-                self._offer_checking(pending),
-                name="orchestrator-checking",
-            )
+            if self._checking_task is None or self._checking_task.done():
+                self._checking_task = asyncio.create_task(
+                    self._offer_checking(),
+                    name="orchestrator-checking",
+                )
             try:
                 result = await asyncio.wait_for(
                     pending.future, timeout=self.manager.settings.tool_timeout_seconds
@@ -465,10 +470,7 @@ class _LiveCall:
                 self.record.pending_tools.pop(tool_call_id, None)
                 return
             finally:
-                if not checking.done():
-                    checking.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await checking
+                await self._stop_checking_if_idle()
             self.record.pending_tools.pop(tool_call_id, None)
             if self._hangup.is_set():
                 return
@@ -482,18 +484,32 @@ class _LiveCall:
             continue_response=True,
         )
 
-    async def _offer_checking(self, pending: PendingTool) -> None:
-        """One soft context turn after audio already queued for this response.
+    def _orchestrator_still_open(self) -> bool:
+        return any(not item.future.done() for item in self.record.pending_tools.values())
 
-        Not a playout buffer on the happy path. Cancelled when the answer arrives first.
+    async def _stop_checking_if_idle(self) -> None:
+        """Drop the shared checking turn once every orchestrator call is answered."""
+        if self._orchestrator_still_open():
+            return
+        task = self._checking_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _offer_checking(self) -> None:
+        """One soft context turn for every ask_orchestrator still open.
+
+        Parallel asks share this task. It is not a playout buffer on the happy path.
         """
         try:
-            if pending.future.done() or self._hangup.is_set():
+            if self._hangup.is_set() or not self._orchestrator_still_open():
                 return
             await self._await_queued_audio(cap_seconds=2.0, settle_seconds=0.05)
-            if pending.future.done() or self._hangup.is_set():
+            if self._hangup.is_set() or not self._orchestrator_still_open():
                 return
-            await self.provider.offer_checking_context(pending.tool_call_id)
+            await self.provider.offer_checking_context(None)
         except asyncio.CancelledError:
             raise
         except Exception:

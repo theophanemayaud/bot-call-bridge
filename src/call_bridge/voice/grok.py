@@ -228,23 +228,14 @@ class GrokVoiceProvider(VoiceAgentProvider):
         )
 
     async def offer_checking_context(self, call_id: str | None = None) -> None:
-        """Context only, while ask_orchestrator is unanswered.
+        """One per-response instruction while ask_orchestrator is unanswered.
 
-        A system item plus ``response.create`` instructions. Not ``force_message``.
-        The model may speak in its own words. Skipped once that call is answered.
+        ``response.instructions`` apply only to that response. The note is not
+        written into conversation history. A second call while the turn is open
+        does not send another ``response.create``.
         """
-        if self._ws is None or (call_id and call_id in self._settled_calls):
+        if self._ws is None or self._checking_turn:
             return
-        await self._send(
-            {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": ORCHESTRATOR_CHECKING_CONTEXT}],
-                },
-            }
-        )
         if call_id and call_id in self._settled_calls:
             return
         self._checking_turn = True

@@ -25,7 +25,7 @@ Nothing in this repo has been run against a live Grok socket since the model pin
 | Tools | Named functions `hangup` and `ask_orchestrator` (`question` required). No transcript guessing |
 | Live user transcript | `audio.input.transcription.model=grok-transcribe` so `…transcription.updated` / `completed` are emitted |
 | Disclosure | `force_message` (verbatim). Not used for the orchestrator wait |
-| Orchestrator wait | One system item + `response.create` instructions: checking, may take a few seconds, the model may tell the person. Not a scripted line |
+| Orchestrator wait | One `response.create` instruction for all open `ask_orchestrator` calls: checking, may take a few seconds, the model may tell the person. Not a conversation item and not a scripted line |
 | Probe | `POST /v1/voice/probe` |
 
 `hangup` is local: the bridge ACKs with `function_call_output`, keeps playing queued goodbye audio, waits `HANGUP_GRACE_SECONDS`, then SIP BYE. That wait does not block the event consumer, so the orchestrator still receives transcripts. `ask_orchestrator` is emitted on the call events WebSocket and answered with `POST /v1/calls/{id}/tool-results`. A future `dial_digits` (DTMF) tool is a `ToolSpec` plus `LOCAL_TOOL_NAMES` plus a branch next to `hangup` in the session dispatcher. It is not implemented.
@@ -90,7 +90,7 @@ Verified in unit tests and the mock call (no live xAI or SIP):
 - Default model id `grok-voice-3.0`, reasoning `none`, PCMA without a rate field, `server_vad`
 - `hangup` and `ask_orchestrator` are sent as `type: function`, and `question` is required
 - A `response.function_call_arguments.done` event becomes a `tool_call`. A goodbye transcript does not
-- Checking context is a system item plus `response.create` instructions, not `force_message`
+- Checking context is one `response.create` instruction, not a conversation item and not `force_message`. A second ask while that turn is open does not send another `response.create`
 - An answered call skips a late checking turn. The answer's `response.create` waits out an in-flight checking turn
 - Mock call events include the live transcript and the `ask_orchestrator` tool. Hangup does not block that stream
 - Spoken goodbye alone does not SIP BYE
