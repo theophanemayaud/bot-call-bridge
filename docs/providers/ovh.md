@@ -56,13 +56,21 @@ Label: **public grid / product pages, not a quote.** Verify in the manager and [
 
 | Item | Ballpark (HT) | Notes |
 |---|---|---|
-| Line (Découverte) | ~0.99 € / month | One simultaneous call |
+| Line (Découverte) | ~0.99 € / month | One simultaneous call — not enough for warm handoff |
 | FR fixed | Often **included** on Découverte | Caps apply (distinct numbers / 60 min per call on included destinations — check current offer) |
 | FR mobile | **~0.08 € / min** | Billed per second; not included on Découverte |
 | NO mobile | **~0.012 € / min** | Public grid; confirm destination still billed this way |
 | Hors-forfait ceiling | **~150 € HT / billing group** default after the line is established | New groups may start ~10 € HT; raise via deposit if needed. Hitting 100% **suspends the group**. |
 
 Included destinations changed during 2026 (Découverte recentred). Do not treat “Norway fixed included” as forever — read the current offer footnotes.
+
+## Two channels for warm handoff
+
+A hold-then-connect call places a **second INVITE** on the same registration (target leg + owner leg) and relays RTP in this process. Découverte is one simultaneous call, so the owner INVITE is rejected (often `486` / `403`).
+
+Before a live handoff, raise the line's simultaneous-call limit to at least **two** (or use an offer that includes two channels). Both legs share this REGISTER, the line's caller ID, and the existing `SIP_RTP_PORT_*` range. No second registration and no conference room.
+
+REFER / blind transfer is not used: the bridge would leave the media path, so it could not play the owner a one-line context, retry a missed pickup, or keep the agent on the line while the owner rings.
 
 ## Why this is the bot-box default
 

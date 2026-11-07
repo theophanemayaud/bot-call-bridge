@@ -54,7 +54,8 @@ Watch `call.state`: `dialing` → `ringing` / `bridged`. `failed` + `voice.error
 | `tool_call` `hangup` | Bridge BYEs after goodbye grace — report the `summary` / `reason` (Live may classify a goodbye delegation as hangup, or fall back after "I'll hang up") |
 | You decide to stop | `POST …/hangup` `{ "reason": "orchestrator" }` |
 | Voicemail | SCRIPT + Live prompts: short message (who + why), goodbye, hang up. Do not wait in silence |
-| Idle (`idle_timeout`) | Bridge BYEs after `CALL_IDLE_TIMEOUT_SECONDS` (default 30) with no user/assistant speech. Comfort-noise RTP does not count. `0` disables |
+| Idle (`idle_timeout`) | Bridge BYEs after `CALL_IDLE_TIMEOUT_SECONDS` (default 30) with no user/assistant speech. Comfort-noise RTP does not count. `0` disables. Suspended while a warm handoff is holding or relayed |
+| `handoff` | Stages of an opted-in warm handoff. Do not answer `human_answered` with `/tool-results` — the bridge ACKs that tool |
 
 Do not tell the callee about tool names or the control plane.
 
@@ -77,6 +78,19 @@ Each `answer` is one short, speakable instruction:
 | Callee is wrapping up / said goodbye | Short confirmation + `Say goodbye and hang up.` Do not ask open questions or reopen the conversation |
 
 Keep it fast (real-time first): answer within a few seconds, one or two sentences. Do not send a `speak`/`steer` that contradicts or reopens a goodbye the model just said.
+
+### Warm handoff
+
+Add `handoff` (or `handoff_to`) to the SCRIPT. The owner number is `HANDOFF_OWNER_NUMBER` unless that SCRIPT sets `handoff.to`. Put the connecting line and the owner context line in the call language. Set `voice.max_duration_seconds` long enough for the queue plus the conversation (`HANDOFF_MAX_HOLD_SECONDS`, default 600, stops a hold that never reaches a person).
+
+Watch `handoff` events (`holding` → `human_answered` → `announcing` → `dialing_owner` → `merged`, or `owner_unavailable` / `hold_timeout`). Grok calls `human_answered` itself. GPT-Live client delegation cannot name that tool (PR #12). Until then, when the transcript shows a live person, post:
+
+```http
+POST /v1/calls/{id}/handoff
+{ "action": "human_answered", "summary": "Support agent greeted us" }
+```
+
+Do not infer that inside the bridge from keywords. The SIP line must allow two simultaneous calls (OVH Découverte does not).
 
 ## 4. Report the outcome
 

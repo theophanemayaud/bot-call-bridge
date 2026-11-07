@@ -8,7 +8,7 @@ Set `VOICE_PROVIDER=grok` and paste `XAI_API_KEY`. Other Grok env defaults are r
 |---|---|
 | Codec | Native **PCMA** 8 kHz both ways |
 | Turn taking | `server_vad` (Grok); bridge maps semantic defaults when needed |
-| Tools | `ask_orchestrator`, `hangup` |
+| Tools | `ask_orchestrator`, `hangup`. A SCRIPT `handoff` also exposes `human_answered`, `bring_in_owner`, and `dial_digits` |
 | Disclosure | `force_message` / speak-first path |
 | Probe | `POST /v1/voice/probe` |
 

@@ -12,7 +12,8 @@ This path is **GPT-Live only** (`gpt-live-1` over `wss://api.openai.com/v1/live/
 | Turn taking | Model + prompt (Backchannel / Interruption / Silence policies). No Realtime VAD knobs |
 | Tools | Client delegation (`delegation.type=client`) → `session.delegation.created` → classified as `ask_orchestrator` or `hangup` from the current closer (bye / take care / au revoir / ha det bra / I'll hang up). Explicit "I'll hang up" with no follow-up delegation still BYEs after a short settle. |
 | Voicemail | Live instructions: short message (who + why), goodbye, then delegate hangup. Do not sit silent after the greeting |
-| Idle hangup | Bridge-wide `CALL_IDLE_TIMEOUT_SECONDS` (default 30) — not Live-specific. See `AGENTS.md` |
+| Idle hangup | Bridge-wide `CALL_IDLE_TIMEOUT_SECONDS` (default 30) — not Live-specific. Suspended during warm-handoff hold and relay. See `AGENTS.md` |
+| Warm handoff | Named `human_answered` is **not** visible to client delegation. The orchestrator posts `POST /v1/calls/{id}/handoff` until named Live tools (PR #12) ship. The bridge does not classify this from spoken words. |
 | Steers | `session.instructions.append` (steer) / verbatim disclosure via instructions.append |
 | Orchestrator answers | `session.commentary.append` (spoken, may paraphrase) |
 | Probe | `POST /v1/voice/probe` |

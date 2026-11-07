@@ -71,6 +71,7 @@ class _Dialog:
     answered: asyncio.Event = field(default_factory=asyncio.Event)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     invite_via_branch: str = ""
+    provisional_to: str | None = None
 
 
 class _SipProtocol(asyncio.DatagramProtocol):
@@ -227,6 +228,10 @@ class LiveSipEndpoint(SipEndpoint):
         sdp = build_sdp(origin_ip=self._advertise_host, rtp_port=rtp_port)
         try:
             response = await self._invite_transaction(dialog, sdp)
+        except asyncio.CancelledError:
+            if not dialog.answered.is_set():
+                self._abort_unanswered(dialog)
+            raise
         except Exception:
             self._close_rtp(dialog)
             self._dialogs.pop(local_call_id, None)
@@ -263,6 +268,10 @@ class LiveSipEndpoint(SipEndpoint):
     async def hangup(self, local_call_id: str, reason: str = "local") -> None:
         dialog = self._dialogs.get(local_call_id)
         if not dialog or dialog.state in {"ended", "failed"}:
+            return
+        # Unanswered INVITE: CANCEL, not BYE. The owner-leg ring timeout uses this.
+        if not dialog.answered.is_set() and dialog.state in {"calling", "ringing"}:
+            self._abort_unanswered(dialog, reason=reason)
             return
         dialog.reason = reason
         if dialog.state in {"answered", "ringing", "calling"}:
@@ -427,11 +436,14 @@ class LiveSipEndpoint(SipEndpoint):
                 "via",
                 self._via(branch=sip_branch()),
             )
+            dialog.invite_via_branch = msg.get("via", "").split("branch=")[-1].split(";")[0]
             response = await self._exchange(msg, timeout=45.0, dialog=dialog)
         while response.status_code() is not None and 100 <= response.status_code() < 200:
             if response.status_code() == 180:
                 dialog.state = "ringing"
                 await self._events.put(("sip.invite", {"state": "ringing", "to": dialog.dest}))
+            if response.get("to"):
+                dialog.provisional_to = response.get("to")
             if response.body:
                 try:
                     remote = parse_sdp(response.body)
@@ -441,6 +453,39 @@ class LiveSipEndpoint(SipEndpoint):
                     pass
             response = await self._wait_final_or_provisional(dialog, timeout=45.0)
         return response
+
+    def _abort_unanswered(self, dialog: _Dialog, reason: str = "cancelled") -> None:
+        """CANCEL an INVITE that has not received 200 OK, then drop the dialog."""
+        if dialog.answered.is_set() or dialog.state in {"ended", "failed"}:
+            return
+        key = f"{dialog.sip_call_id}:{dialog.cseq}:INVITE"
+        pending = self._pending.pop(key, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if dialog.invite_via_branch:
+            try:
+                self._send_cancel(dialog)
+            except Exception as exc:
+                log.warning("CANCEL failed: %s", exc)
+        dialog.state = "ended"
+        dialog.reason = reason
+        dialog.finished.set()
+        self._close_rtp(dialog)
+        self._dialogs.pop(dialog.local_call_id, None)
+        self._events.put_nowait(("sip.hangup", {"reason": reason, "to": dialog.dest}))
+
+    def _send_cancel(self, dialog: _Dialog) -> None:
+        """RFC 3261 CANCEL: same Call-ID, From, CSeq number, and Via branch as the INVITE."""
+        cancel = self._base_request(
+            method="CANCEL",
+            request_uri=dialog.request_uri,
+            from_header=dialog.from_header,
+            to_header=dialog.provisional_to or dialog.to_header,
+            call_id=dialog.sip_call_id,
+            cseq=dialog.cseq,
+        )
+        cancel.set("via", self._via(branch=dialog.invite_via_branch))
+        self._send(cancel)
 
     async def _ack(self, dialog: _Dialog, ok: SipMessage) -> None:
         cseq_n, _ = ok.cseq() or (dialog.cseq, "INVITE")
@@ -589,6 +634,8 @@ class LiveSipEndpoint(SipEndpoint):
                             await self._events.put(
                                 ("sip.invite", {"state": "ringing", "to": dialog.dest})
                             )
+                        if response.get("to"):
+                            dialog.provisional_to = response.get("to")
                         if response.body:
                             try:
                                 remote = parse_sdp(response.body)

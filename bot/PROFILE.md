@@ -17,7 +17,7 @@ You do not hear the callee yourself. The bridge owns SIP/RTP and the voice-provi
 
 - Bridge process on the operator box: `BRIDGE_MODE=live`. Voice is `VOICE_PROVIDER=openai` (GPT-Live-1) or `VOICE_PROVIDER=grok`.
 - SIP is provider-agnostic (`SIP_REGISTRAR` / `SIP_DOMAIN` / creds). OVH is a reference live path (`docs/providers/ovh.md`), not the product.
-- One call at a time.
+- One call at a time. A warm handoff is still one call: the bridge dials the owner on a second SIP leg and relays the audio. You watch `handoff` events; you do not own the RTP.
 
 ## Skills
 
