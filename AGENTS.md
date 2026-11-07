@@ -42,6 +42,7 @@ Base URL is this process (`HTTP_PORT`, default `43123`).
 | Hang up | `POST /v1/calls/{id}/hangup` `{ "reason": "orchestrator" }` |
 | Mid-call steer | `POST /v1/calls/{id}/guidelines` `{ "text": "…", "mode": "steer" \| "speak" }` |
 | Answer a tool | `POST /v1/calls/{id}/tool-results` `{ "tool_call_id", "output" }` |
+| Warm handoff | `POST /v1/calls/{id}/handoff` `{ "action": "human_answered" \| "bring_in_owner", "summary" }` |
 | Live events | `WS /v1/calls/{id}/events` or `WS /v1/events` |
 | Health | `GET /health` · `GET /v1/status` |
 
@@ -56,8 +57,9 @@ See `examples/script.sample.json`. Required:
 - `mission.disclosure` — AI disclosure. Spoken first when `speak_disclosure_first` is true.
 - `mission.goals` — at least one.
 - `mission.constraints` / `mission.fallbacks` — optional prompt bullets.
+- `handoff` — optional. Present means: wait for a live person, then dial the owner and relay the two legs. `handoff.to` / top-level `handoff_to` overrides `HANDOFF_OWNER_NUMBER`. Omit both and the call stays single-leg.
 
-Do not put secrets or real personal numbers in the SCRIPT checked into git.
+Do not put secrets or real personal numbers in the SCRIPT checked into git. The owner number belongs in `HANDOFF_OWNER_NUMBER`.
 
 ## Events the Call agent must handle quickly
 
@@ -66,6 +68,7 @@ Subscribe to the call WebSocket before or immediately after `POST /v1/calls`.
 - `call.state` — `dialing` → `ringing`/`bridged` → `waiting_orchestrator` → `ended` / `failed`
 - `transcript` — `{ role, text, final }`
 - `tool_call` — `{ tool, tool_call_id, arguments }`
+- `handoff` — `{ stage, owner_name, ... }` when the SCRIPT opted in
 - `voice.error`, `sip.invite`, `sip.hangup`
 
 ### `ask_orchestrator`
@@ -93,6 +96,20 @@ The model calls `hangup` (Grok / function tools) or Live client-delegates after 
 
 **Idle safety net:** `CALL_IDLE_TIMEOUT_SECONDS` (default 30, `0` disables) BYEs any call with no user transcript and no assistant transcript/audio for that long (`hangup_reason=idle_timeout`). Comfort-noise RTP does not count. `max_duration` remains the hard cap.
 
+### Warm handoff
+
+Opt-in (`handoff` / `handoff_to` on the SCRIPT). This process places a second outbound INVITE and relays PCMA between the two dialogs. It does not send SIP REFER and it does not use an OVH conference room.
+
+The voice model decides that a person (not hold music or a recording) has answered by calling the named tool `human_answered`. `dial_digits` sends in-band DTMF. `bring_in_owner` starts the owner leg early only when `lead_seconds` > 0. The bridge speaks the connecting line, dials `HANDOFF_OWNER_NUMBER` (or `handoff.to`), plays one context line to the owner only, then mutes the model. `HANDOFF_MAX_HOLD_SECONDS` (default 600) is the safety cap. A missed owner rings `HANDOFF_OWNER_RETRIES` extra times (default 1), then `tell` (stay on the line) or `hangup`.
+
+`handoff` event stages: `holding`, `human_answered`, `announcing`, `dialing_owner`, `owner_answered`, `owner_parked`, `owner_context`, `merged`, `owner_no_answer`, `owner_retry`, `owner_unavailable`, `hold_timeout`, `ended`. The orchestrator does not answer `human_answered`; the bridge ACKs it.
+
+Idle hangup is off during hold and during the relay (no transcripts). `max_duration` still applies.
+
+Grok exposes the tools as functions. GPT-Live client delegation cannot name them (see PR #12). Until that lands, post `POST /v1/calls/{id}/handoff` from the transcript. Do not add a word classifier for this.
+
+The SIP account needs two simultaneous channels. OVH Découverte is one. See `docs/providers/ovh.md`.
+
 ## Voice providers
 
 `VoiceAgentProvider` in `src/call_bridge/voice/provider.py` is the only interface SIP/RTP talks to.
@@ -105,7 +122,7 @@ Native wire audio is **PCMA 8 kHz**. Do not add a resample path unless a future 
 
 ## One line
 
-`MAX_CONCURRENT_CALLS=1`. Fail a second `start_call`.
+`MAX_CONCURRENT_CALLS=1`. Fail a second `start_call`. A warm handoff is still that one call: two SIP dialogs, one registration.
 
 ## Fail-fast
 

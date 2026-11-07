@@ -43,6 +43,12 @@ class ToolResultBody(BaseModel):
     output: dict[str, Any]
 
 
+class HandoffActionBody(BaseModel):
+    action: Literal["human_answered", "bring_in_owner"]
+    summary: str = ""
+    party: str = ""
+
+
 class ProbeBody(BaseModel):
     provider: Literal["grok", "openai"] | None = None
 
@@ -162,6 +168,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         manager: CallManager = app.state.manager
         try:
             await manager.inject_guideline(call_id, body.text, mode=body.mode)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown call {call_id}") from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/v1/calls/{call_id}/handoff")
+    async def handoff(call_id: str, body: HandoffActionBody):
+        """Orchestrator trigger for the same transition as the human_answered tool.
+
+        Grok Voice calls the named tool itself. GPT-Live on this branch still uses
+        client delegation (no tool name) until named-tool support lands, so the
+        orchestrator posts this when the transcript shows a live person.
+        """
+        manager: CallManager = app.state.manager
+        try:
+            await manager.request_handoff(
+                call_id,
+                body.action,
+                summary=body.summary,
+                party=body.party,
+            )
         except KeyError as exc:
             raise HTTPException(404, f"unknown call {call_id}") from exc
         except RuntimeError as exc:

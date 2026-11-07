@@ -63,8 +63,19 @@ class Settings(BaseSettings):
     hangup_grace_seconds: float = 2.5
     # No user transcript and no assistant transcript/audio for this long → BYE.
     # Comfort-noise RTP does not count. 0 disables. max_duration is still the cap.
+    # Ignored while a warm handoff is holding or the two humans are relayed.
     call_idle_timeout_seconds: float = Field(default=30.0, ge=0)
     max_concurrent_calls: int = 1
+
+    # Warm handoff (second SIP leg). Empty number disables the env default;
+    # a SCRIPT still has to opt in with `handoff` / `handoff_to`.
+    handoff_owner_number: str = ""
+    handoff_owner_name: str = "the owner"
+    handoff_max_hold_seconds: float = Field(default=600.0, ge=0, le=3600)
+    handoff_owner_ring_seconds: float = Field(default=20.0, ge=0.05, le=120)
+    handoff_owner_retries: int = Field(default=1, ge=0, le=3)
+    handoff_lead_seconds: float = Field(default=0.0, ge=0, le=180)
+    handoff_on_unavailable: Literal["tell", "hangup"] = "tell"
 
     def sip_proxy_host(self) -> str:
         """Outbound proxy, or the registrar when SIP_PROXY is unset."""

@@ -79,4 +79,6 @@ Expect `sip.state == registered`. Then `POST /v1/voice/probe` (live opens a shor
 
 Open UDP `SIP_LOCAL_PORT` and `SIP_RTP_PORT_*` on the host firewall. One registration / one call (`MAX_CONCURRENT_CALLS=1`).
 
+Warm handoff (`HANDOFF_OWNER_NUMBER`, SCRIPT `handoff`) needs that same registration to allow **two simultaneous calls**. OVH Découverte is one channel. See `docs/providers/ovh.md`.
+
 If this fails, use **troubleshoot**. To place a SCRIPT, use **handle-a-call**.

@@ -17,6 +17,7 @@ EventKind = Literal[
     "guideline",
     "tool_call",
     "tool_result",
+    "handoff",
     "voice.error",
     "audio",
 ]

@@ -13,6 +13,7 @@ os.environ.setdefault("HTTP_PORT", "43123")
 @pytest.fixture
 def settings(monkeypatch):
     monkeypatch.setenv("BRIDGE_MODE", "mock")
+    monkeypatch.delenv("HANDOFF_OWNER_NUMBER", raising=False)
     from call_bridge.config import get_settings
 
     get_settings.cache_clear()
